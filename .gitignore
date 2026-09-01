@@ -1,0 +1,60 @@
+# Build products.
+#
+# `build/` is assembled from scratch by Scripts/bundle.sh on every `make app`
+# (bundle, Info.plist and entitlements are all generated), and `.build/` is
+# SwiftPM's own cache — neither belongs in the repo.
+build/
+.build/
+DerivedData/
+*.dSYM/
+*.o
+*.dia
+
+# SwiftPM local state. Package.resolved is deliberately *not* ignored: this is
+# an app, so a pinned dependency graph is worth committing (there are none
+# today, but that may change).
+.swiftpm/
+Package.pins
+.netrc
+
+# Xcode per-user state — schemes, breakpoints, window layout.
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+*.perspectivev3
+
+# Signing material. Release builds take a Developer ID identity and
+# notarisation credentials from the environment (PRD 10.1); nothing that can
+# sign or notarise should ever be checked in.
+*.p12
+*.cer
+*.certSigningRequest
+*.provisionprofile
+*.mobileprovision
+AuthKey_*.p8
+.env
+.env.*
+
+# macOS filesystem debris.
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.DocumentRevisions-V100
+.TemporaryItems
+
+# Editor and tooling scratch.
+*.swp
+*~
+.idea/
+.vscode/
+
+# Local test output and profiling runs.
+*.log
+*.trace
+*.xcresult/

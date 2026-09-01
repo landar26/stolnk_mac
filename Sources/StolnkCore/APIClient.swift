@@ -1,0 +1,206 @@
+import Foundation
+
+/// Talks to the Worker. Holds the device session token and renews it by
+/// re-signing a challenge whenever the server says it has expired.
+public actor APIClient {
+	public let origin: URL
+	private let identity: DeviceIdentity
+	private let session: URLSession
+	private var deviceID: String?
+	private var token: String?
+
+	public init(origin: URL, identity: DeviceIdentity, session: URLSession = .shared) {
+		self.origin = origin
+		self.identity = identity
+		self.session = session
+	}
+
+	public func adopt(deviceID: String, token: String?) {
+		self.deviceID = deviceID
+		self.token = token
+	}
+
+	public var currentDeviceID: String? { deviceID }
+	public var currentToken: String? { token }
+
+	// MARK: - Registration and auth
+
+	/// The name is part of registration, not a later upgrade: it *is* the
+	/// identity (PRD 6.1). A name already in use fails with 409 and creates
+	/// nothing, so retrying with a different one is clean.
+	///
+	/// No display name is sent: the first inbox is the device's own, so the server
+	/// names it after the name. It can be changed later like any other inbox's.
+	public func register(name: String, slug: String) async throws -> RegistrationResult {
+		let result: RegistrationResult = try await send(
+			"POST", "/api/v1/devices",
+			body: [
+				"name": name,
+				"slug": slug,
+				"pubkey_sig": identity.signingPublicKeyEncoded,
+				"pubkey_kex": identity.agreementPublicKeyEncoded,
+			],
+			authenticated: false
+		)
+		deviceID = result.deviceID
+		token = result.token
+		return result
+	}
+
+	/// Challenge-response against the Secure Enclave key. No password exists to
+	/// be phished, and nothing exportable is ever sent.
+	@discardableResult
+	public func authenticate() async throws -> String {
+		guard let deviceID else { throw APIError(status: 0, code: "no_device", message: "Not registered.") }
+		struct Challenge: Codable { let nonce: String }
+		let challenge: Challenge = try await send(
+			"GET", "/api/v1/devices/\(deviceID)/challenge", authenticated: false)
+		let signature = try identity.sign(challenge: challenge.nonce)
+		let session: SessionToken = try await send(
+			"POST", "/api/v1/devices/\(deviceID)/auth",
+			body: ["nonce": challenge.nonce, "signature": signature],
+			authenticated: false
+		)
+		token = session.token
+		return session.token
+	}
+
+	// MARK: - Inboxes
+
+	/// The name rides along, so a refresh keeps the displayed address current.
+	public func inboxes() async throws -> (name: String, inboxes: [InboxSummary]) {
+		struct Response: Codable { let name: String; let inboxes: [InboxSummary] }
+		let response: Response = try await send("GET", "/api/v1/inboxes")
+		return (response.name, response.inboxes)
+	}
+
+	public func createInbox(slug: String, displayName: String) async throws -> InboxSummary {
+		try await send(
+			"POST", "/api/v1/inboxes", body: ["slug": slug, "display_name": displayName])
+	}
+
+	/// `slug` nil leaves the path alone. There is no empty path to move to.
+	public func updateInbox(
+		_ inboxID: String,
+		displayName: String? = nil,
+		slug: String? = nil,
+		paused: Bool? = nil,
+		confirmFirst: Bool? = nil
+	) async throws -> InboxSummary {
+		var body: [String: Any] = [:]
+		if let displayName { body["display_name"] = displayName }
+		if let slug { body["slug"] = slug }
+		if let paused { body["paused"] = paused }
+		if let confirmFirst { body["confirm_first"] = confirmFirst }
+		return try await send("PATCH", "/api/v1/inboxes/\(inboxID)", body: body)
+	}
+
+	public func resetInbox(_ inboxID: String) async throws -> InboxSummary {
+		try await send("POST", "/api/v1/inboxes/\(inboxID)/reset")
+	}
+
+	public func deleteInbox(_ inboxID: String) async throws {
+		struct Response: Codable { let deleted: Bool }
+		let _: Response = try await send("DELETE", "/api/v1/inboxes/\(inboxID)")
+	}
+
+	/// Renaming. Every link moves with the name, so the server hands back the
+	/// whole list rather than making the caller refresh.
+	public func rename(to name: String) async throws -> [InboxSummary] {
+		struct Response: Codable { let name: String; let inboxes: [InboxSummary] }
+		let response: Response = try await send("POST", "/api/v1/names", body: ["name": name])
+		return response.inboxes
+	}
+
+	public func nameAvailable(_ name: String) async throws -> Bool {
+		struct Response: Codable { let name: String; let available: Bool }
+		let escaped =
+			name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
+		let response: Response = try await send("GET", "/api/v1/names/\(escaped)/available")
+		return response.available
+	}
+
+	// MARK: - Delivery
+
+	public func pending() async throws -> PendingResponse {
+		try await send("GET", "/api/v1/pending")
+	}
+
+	public func accept(fileID: String, always: Bool) async throws {
+		struct Response: Codable { let accepted: Bool }
+		let _: Response = try await send(
+			"POST", "/api/v1/files/\(fileID)/accept", body: ["always": always])
+	}
+
+	public func decline(fileID: String) async throws {
+		struct Response: Codable { let declined: Bool }
+		let _: Response = try await send("POST", "/api/v1/files/\(fileID)/decline")
+	}
+
+	/// Deleting the relay object is the server's synchronous response to this
+	/// call (PRD 8.5), so it must only be sent once the file is safely landed.
+	public func acknowledge(fileID: String) async throws {
+		struct Response: Codable { let delivered: Bool }
+		let _: Response = try await send("POST", "/api/v1/files/\(fileID)/ack")
+	}
+
+	public func contentRequest(fileID: String, from offset: Int) async throws -> URLRequest {
+		var request = URLRequest(url: origin.appendingPathComponent("api/v1/files/\(fileID)/content"))
+		if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+		if offset > 0 { request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range") }
+		return request
+	}
+
+	public func signallingURL() -> URL? {
+		guard let token else { return nil }
+		var components = URLComponents(
+			url: origin.appendingPathComponent("api/v1/ws/device"), resolvingAgainstBaseURL: false)
+		components?.scheme = origin.scheme == "https" ? "wss" : "ws"
+		components?.queryItems = [URLQueryItem(name: "token", value: token)]
+		return components?.url
+	}
+
+	// MARK: - Plumbing
+
+	private func send<T: Decodable>(
+		_ method: String,
+		_ path: String,
+		body: [String: Any]? = nil,
+		authenticated: Bool = true,
+		allowRetry: Bool = true
+	) async throws -> T {
+		var request = URLRequest(url: origin.appendingPathComponent(String(path.dropFirst())))
+		request.httpMethod = method
+		if let body {
+			request.httpBody = try JSONSerialization.data(withJSONObject: body)
+			request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+		}
+		if authenticated, let token {
+			request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+		}
+
+		let (data, response) = try await session.data(for: request)
+		let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+
+		if status == 401, authenticated, allowRetry, deviceID != nil {
+			// Sessions are short-lived by design; renewing one is silent.
+			_ = try await authenticate()
+			return try await send(method, path, body: body, authenticated: true, allowRetry: false)
+		}
+
+		guard (200..<300).contains(status) else {
+			let decoded = try? JSONDecoder().decode(WireError.self, from: data)
+			throw APIError(
+				status: status,
+				code: decoded?.error ?? "http_\(status)",
+				message: decoded?.message ?? "Request failed (\(status))."
+			)
+		}
+		return try JSONDecoder().decode(T.self, from: data)
+	}
+
+	private struct WireError: Codable {
+		let error: String
+		let message: String
+	}
+}
