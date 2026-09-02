@@ -37,11 +37,19 @@ public struct LandedFile: Codable, Sendable, Identifiable, Hashable {
 }
 
 public struct StoredState: Codable, Sendable {
+	#if DEBUG
+	public static let defaultScheme = "http"
+	public static let defaultBaseHost = "localhost:5173"
+	#else
+	public static let defaultScheme = "https"
+	public static let defaultBaseHost = "stolnk.com"
+	#endif
+
 	/// The apex the Mac talks to. Inbox links live one label below it, at
 	/// `<name>.<baseHost>`, but the Mac never assembles one — every URL it shows
 	/// comes from the server.
-	public var scheme: String = "http"
-	public var baseHost: String = "localhost:5173"
+	public var scheme: String = Self.defaultScheme
+	public var baseHost: String = Self.defaultBaseHost
 	public var deviceID: String?
 	public var name: String?
 	public var token: String?
@@ -67,21 +75,65 @@ public final class InboxStore: @unchecked Sendable {
 	private let url: URL
 	private var state: StoredState
 
+	/// Debug and release builds talk to different servers, and everything in this
+	/// file is scoped to one of them: a device ID registered against localhost
+	/// means nothing to production, and the folder bindings key off inbox IDs
+	/// that only exist on one side. Sharing one file meant whichever build ran
+	/// last won — and since only the release build repaired the origin, that
+	/// repair was one-directional, so a single release run pinned every later
+	/// debug run to production too.
+	#if DEBUG
+	private static let filename = "state-debug.json"
+	#else
+	private static let filename = "state.json"
+	#endif
+
 	public init(directory: URL? = nil) {
 		let base =
 			directory
 			?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
 				.appendingPathComponent("Stolnk", isDirectory: true)
 		try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-		self.url = base.appendingPathComponent("state.json")
+		self.url = base.appendingPathComponent(Self.filename)
 
-		if let data = try? Data(contentsOf: url),
-			let decoded = try? JSONDecoder().decode(StoredState.self, from: data)
+		var loaded = Self.decode(at: url)
+
+		#if DEBUG
+		// Adopt the file both configurations used to share, once, so a developer
+		// keeps the device and folder bindings they already had. Only when it
+		// holds a development origin: pulling production state into a debug run
+		// is the exact confusion this split exists to end.
+		if loaded == nil,
+			let shared = Self.decode(at: base.appendingPathComponent("state.json")),
+			shared.scheme == StoredState.defaultScheme,
+			shared.baseHost == StoredState.defaultBaseHost
 		{
-			self.state = decoded
-		} else {
-			self.state = StoredState()
+			loaded = shared
 		}
+		#endif
+
+		self.state = loaded.map(Self.repaired) ?? StoredState()
+	}
+
+	private static func decode(at url: URL) -> StoredState? {
+		guard let data = try? Data(contentsOf: url) else { return nil }
+		return try? JSONDecoder().decode(StoredState.self, from: data)
+	}
+
+	/// Earlier builds, made before configuration-specific defaults, wrote the
+	/// development origin into every fresh install. Do not let that stale default
+	/// make a released app try to connect to the user's own Mac.
+	private static func repaired(_ state: StoredState) -> StoredState {
+		#if DEBUG
+		return state
+		#else
+		var state = state
+		if state.scheme == "http", state.baseHost == "localhost:5173" {
+			state.scheme = StoredState.defaultScheme
+			state.baseHost = StoredState.defaultBaseHost
+		}
+		return state
+		#endif
 	}
 
 	public var snapshot: StoredState {

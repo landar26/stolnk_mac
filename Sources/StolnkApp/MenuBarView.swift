@@ -13,6 +13,11 @@ struct MenuBarView: View {
 		VStack(alignment: .leading, spacing: 0) {
 			header
 
+			if state.confirmation != nil {
+				Divider()
+				awaitingConfirmation
+			}
+
 			Divider()
 
 			ScrollView {
@@ -74,6 +79,34 @@ struct MenuBarView: View {
 			}
 		}
 		.padding(12)
+	}
+
+	/// The prompt is a separate window, so it can end up behind another app or
+	/// be closed by mistake. This is the way back to it — without it a waiting
+	/// file is invisible and looks like nothing arrived.
+	private var awaitingConfirmation: some View {
+		Button {
+			state.showConfirmation()
+		} label: {
+			HStack(spacing: 8) {
+				Image(systemName: "envelope.fill")
+					.foregroundStyle(Color.accentColor)
+				VStack(alignment: .leading, spacing: 1) {
+					Text("A file is waiting for your OK").font(.callout)
+					Text(state.confirmation?.filename ?? "")
+						.font(.caption)
+						.foregroundStyle(.secondary)
+						.lineLimit(1)
+						.truncationMode(.middle)
+				}
+				Spacer()
+				Text("Review…").font(.caption).foregroundStyle(.secondary)
+			}
+			.contentShape(Rectangle())
+		}
+		.buttonStyle(.plain)
+		.padding(.horizontal, 12)
+		.padding(.vertical, 8)
 	}
 
 	private var recent: some View {

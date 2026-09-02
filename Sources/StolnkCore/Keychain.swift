@@ -4,9 +4,23 @@ import Security
 /// Minimal generic-password wrapper. Only ever holds key blobs and the device
 /// session token — never anything belonging to a sender.
 public enum Keychain {
+	/// The keychain service attribute — a storage key, not the bundle
+	/// identifier, despite having once been given the same string. Changing it
+	/// orphans every existing device's identity: the keys become unfindable,
+	/// the Mac cannot re-authenticate, and its name stays taken on the server.
+	/// So it stays as it is even when the app is rebranded.
 	public static let service = "com.stolnk.mac"
 
-	public static func read(_ account: String) -> Data? {
+	/// A miss and a refusal are different facts. On the file-backed keychain a
+	/// denied access prompt comes back as an error, not as "no such item", and a
+	/// caller that flattened both to nil would read a denial as a first launch.
+	public enum ReadResult: Sendable {
+		case found(Data)
+		case missing
+		case failed(OSStatus)
+	}
+
+	public static func read(_ account: String) -> ReadResult {
 		let query: [String: Any] = [
 			kSecClass as String: kSecClassGenericPassword,
 			kSecAttrService as String: service,
@@ -15,8 +29,15 @@ public enum Keychain {
 			kSecMatchLimit as String: kSecMatchLimitOne,
 		]
 		var item: CFTypeRef?
-		guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess else { return nil }
-		return item as? Data
+		switch SecItemCopyMatching(query as CFDictionary, &item) {
+		case errSecSuccess:
+			guard let data = item as? Data else { return .failed(errSecInternalError) }
+			return .found(data)
+		case errSecItemNotFound:
+			return .missing
+		case let status:
+			return .failed(status)
+		}
 	}
 
 	@discardableResult

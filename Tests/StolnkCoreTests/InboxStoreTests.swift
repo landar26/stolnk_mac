@@ -29,6 +29,32 @@ final class InboxStoreTests: XCTestCase {
 		XCTAssertEqual(store.folder(for: "inbox-1")?.standardizedFileURL, folder.standardizedFileURL)
 	}
 
+	func testFreshStoreUsesTheBuildConfigurationOrigin() {
+		let state = InboxStore(directory: directory).snapshot
+
+		#if DEBUG
+		XCTAssertEqual(state.scheme, "http")
+		XCTAssertEqual(state.baseHost, "localhost:5173")
+		#else
+		XCTAssertEqual(state.scheme, "https")
+		XCTAssertEqual(state.baseHost, "stolnk.com")
+		#endif
+	}
+
+	#if !DEBUG
+	func testReleaseMigratesTheLegacyLocalhostDefault() throws {
+		try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+		var legacy = StoredState()
+		legacy.scheme = "http"
+		legacy.baseHost = "localhost:5173"
+		try JSONEncoder().encode(legacy).write(to: directory.appendingPathComponent("state.json"))
+
+		let state = InboxStore(directory: directory).snapshot
+		XCTAssertEqual(state.scheme, "https")
+		XCTAssertEqual(state.baseHost, "stolnk.com")
+	}
+	#endif
+
 	func testUnbindForgetsTheFolder() throws {
 		let store = InboxStore(directory: directory)
 		store.bind(inboxID: "inbox-1", to: try makeFolder("landing"))

@@ -62,44 +62,46 @@ public struct DeviceIdentity: Sendable {
 
 	public enum Failure: Error, LocalizedError {
 		case couldNotPersist
+		case keychainUnreadable(OSStatus)
+		case corruptRecord
 
 		public var errorDescription: String? {
-			"Could not save this Mac's device key to the keychain."
+			switch self {
+			case .couldNotPersist:
+				"Could not save this Mac's device key to the keychain."
+			case .keychainUnreadable(let status):
+				"Could not read this Mac's device key from the keychain (error \(status))."
+			case .corruptRecord:
+				"This Mac's device key record in the keychain is damaged."
+			}
 		}
 	}
 
-	private static let signingAccount = "device-signing-key"
-	private static let agreementAccount = "device-agreement-key"
-	private static let backingAccount = "device-key-backing"
+	/// Both keys and their backing live in a single keychain item. Three items
+	/// meant three access prompts on every launch, and made persistence a
+	/// three-writes-or-none dance; one item is one prompt and is atomic.
+	private static let identityAccount = "device-identity"
+
+	/// The pre-merge layout. Read once to fold into `identityAccount`, then gone.
+	private static let legacySigningAccount = "device-signing-key"
+	private static let legacyAgreementAccount = "device-agreement-key"
+	private static let legacyBackingAccount = "device-key-backing"
+
+	/// `Data` encodes to base64 through `JSONEncoder`, so the blobs survive the
+	/// round trip without a hand-rolled container format.
+	private struct Record: Codable {
+		var backing: String
+		var signing: Data
+		var agreement: Data
+	}
 
 	/// Loads the existing identity, or creates one on first launch.
 	public static func loadOrCreate() throws -> DeviceIdentity {
-		let wantsEnclave = SecureEnclave.isAvailable
-		let storedBacking = Keychain.read(backingAccount).flatMap { String(data: $0, encoding: .utf8) }
-
-		if let signingBlob = Keychain.read(signingAccount),
-			let agreementBlob = Keychain.read(agreementAccount),
-			let backing = storedBacking
-		{
-			if backing == "enclave", wantsEnclave {
-				return DeviceIdentity(
-					signing: .enclave(
-						try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: signingBlob)),
-					agreement: .enclave(
-						try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: agreementBlob)),
-					isEnclaveBacked: true
-				)
-			}
-			if backing == "software" {
-				return DeviceIdentity(
-					signing: .software(try P256.Signing.PrivateKey(rawRepresentation: signingBlob)),
-					agreement: .software(try P256.KeyAgreement.PrivateKey(rawRepresentation: agreementBlob)),
-					isEnclaveBacked: false
-				)
-			}
+		if let record = try loadRecord(), let identity = try identity(from: record) {
+			return identity
 		}
 
-		if wantsEnclave {
+		if SecureEnclave.isAvailable {
 			let signing = try SecureEnclave.P256.Signing.PrivateKey()
 			let agreement = try SecureEnclave.P256.KeyAgreement.PrivateKey()
 			try persist(
@@ -122,20 +124,84 @@ public struct DeviceIdentity: Sendable {
 			signing: .software(signing), agreement: .software(agreement), isEnclaveBacked: false)
 	}
 
-	/// Writing all three or none. A key that generated but did not persist would
-	/// come back as a different device on the next launch, quietly orphaning the
-	/// user's URL — so a failed write is an error, not something to shrug at.
+	/// Nil where the stored keys cannot be used on this Mac — an enclave blob on
+	/// a machine without an enclave is inert, and the caller has to start over.
+	private static func identity(from record: Record) throws -> DeviceIdentity? {
+		if record.backing == "enclave", SecureEnclave.isAvailable {
+			return DeviceIdentity(
+				signing: .enclave(
+					try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: record.signing)),
+				agreement: .enclave(
+					try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: record.agreement)),
+				isEnclaveBacked: true
+			)
+		}
+		if record.backing == "software" {
+			return DeviceIdentity(
+				signing: .software(try P256.Signing.PrivateKey(rawRepresentation: record.signing)),
+				agreement: .software(try P256.KeyAgreement.PrivateKey(rawRepresentation: record.agreement)),
+				isEnclaveBacked: false
+			)
+		}
+		return nil
+	}
+
+	/// Throws rather than reports "nothing stored" when the keychain refuses the
+	/// read. Treating a denied prompt as a first launch would mint fresh keys
+	/// over the top of perfectly good ones and orphan the user's URL.
+	private static func loadRecord() throws -> Record? {
+		switch Keychain.read(identityAccount) {
+		case .found(let data):
+			guard let record = try? JSONDecoder().decode(Record.self, from: data) else {
+				throw Failure.corruptRecord
+			}
+			return record
+		case .failed(let status):
+			throw Failure.keychainUnreadable(status)
+		case .missing:
+			return try migrateLegacyRecord()
+		}
+	}
+
+	/// Costs the old three prompts exactly once, on the first launch after the
+	/// merge, and deletes the old items so it never happens again.
+	private static func migrateLegacyRecord() throws -> Record? {
+		guard let signing = try readLegacy(legacySigningAccount),
+			let agreement = try readLegacy(legacyAgreementAccount),
+			let backingData = try readLegacy(legacyBackingAccount),
+			let backing = String(data: backingData, encoding: .utf8)
+		else { return nil }
+
+		let record = Record(backing: backing, signing: signing, agreement: agreement)
+		try write(record)
+		return record
+	}
+
+	private static func readLegacy(_ account: String) throws -> Data? {
+		switch Keychain.read(account) {
+		case .found(let data): return data
+		case .missing: return nil
+		case .failed(let status): throw Failure.keychainUnreadable(status)
+		}
+	}
+
+	/// A key that generated but did not persist would come back as a different
+	/// device on the next launch, quietly orphaning the user's URL — so a failed
+	/// write is an error, not something to shrug at.
 	private static func persist(signing: Data, agreement: Data, backing: String) throws {
-		guard
-			Keychain.write(signingAccount, signing),
-			Keychain.write(agreementAccount, agreement),
-			Keychain.write(backingAccount, Data(backing.utf8))
-		else {
-			Keychain.delete(signingAccount)
-			Keychain.delete(agreementAccount)
-			Keychain.delete(backingAccount)
+		try write(Record(backing: backing, signing: signing, agreement: agreement))
+	}
+
+	private static func write(_ record: Record) throws {
+		guard let blob = try? JSONEncoder().encode(record), Keychain.write(identityAccount, blob) else {
+			Keychain.delete(identityAccount)
 			throw Failure.couldNotPersist
 		}
+		// Leftovers from the old layout would be picked up as a second, stale
+		// identity by anything still reading them. One item is the whole record.
+		Keychain.delete(legacySigningAccount)
+		Keychain.delete(legacyAgreementAccount)
+		Keychain.delete(legacyBackingAccount)
 	}
 
 	/// Raw uncompressed points, `0x04 || X || Y`, as the API expects.
@@ -155,8 +221,9 @@ public struct DeviceIdentity: Sendable {
 	/// enclave keys cannot be migrated: a new Mac means new keys, and anything
 	/// still parked in the relay for the old ones can no longer be decrypted.
 	public static func destroy() {
-		Keychain.delete(signingAccount)
-		Keychain.delete(agreementAccount)
-		Keychain.delete(backingAccount)
+		Keychain.delete(identityAccount)
+		Keychain.delete(legacySigningAccount)
+		Keychain.delete(legacyAgreementAccount)
+		Keychain.delete(legacyBackingAccount)
 	}
 }

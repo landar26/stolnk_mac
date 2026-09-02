@@ -16,9 +16,15 @@ final class Notifier {
 	private var authorised = false
 	private let isBundled = Bundle.main.bundleIdentifier != nil
 
+	/// Held here because `UNUserNotificationCenter.delegate` is weak.
+	private let router = NotificationRouter()
+
 	func requestAuthorisation() async {
 		guard isBundled else { return }
 		let centre = UNUserNotificationCenter.current()
+		// Must be set before authorisation is requested, or a notification that
+		// arrives during the prompt is routed nowhere.
+		centre.delegate = router
 		authorised =
 			(try? await centre.requestAuthorization(options: [.alert, .sound])) ?? false
 	}
@@ -47,6 +53,16 @@ final class Notifier {
 		post(title: title, body: body, revealing: first.fileURL)
 	}
 
+	/// PRD 13.2 — the prompt itself is a window, and a window can be behind
+	/// something. This is the cue that survives that.
+	func awaitingConfirmation(name: String, inboxName: String, fileID: String) {
+		post(
+			title: "Waiting for your OK · \(inboxName)",
+			body: "\(name) — nothing is written until you accept.",
+			userInfo: ["confirm": fileID]
+		)
+	}
+
 	func inboxUnavailable(named name: String) {
 		post(
 			title: "Inbox paused · \(name)",
@@ -64,6 +80,10 @@ final class Notifier {
 	}
 
 	private func post(title: String, body: String, revealing url: URL?) {
+		post(title: title, body: body, userInfo: url.map { ["path": $0.path] } ?? [:])
+	}
+
+	private func post(title: String, body: String, userInfo: [String: String]) {
 		guard isBundled, authorised else {
 			NSLog("[Stolnk] %@ — %@", title, body)
 			return
@@ -71,7 +91,7 @@ final class Notifier {
 		let content = UNMutableNotificationContent()
 		content.title = title
 		content.body = body
-		if let url { content.userInfo = ["path": url.path] }
+		content.userInfo = userInfo
 		UNUserNotificationCenter.current().add(
 			UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
 	}
@@ -80,5 +100,33 @@ final class Notifier {
 		let formatter = ByteCountFormatter()
 		formatter.countStyle = .file
 		return formatter.string(fromByteCount: Int64(bytes))
+	}
+}
+
+/**
+ Makes notifications clickable.
+
+ Without a delegate the system drops a tap on the floor, and it also hides
+ banners while the app is frontmost — which is exactly when a confirmation
+ prompt has raised the app.
+ */
+private final class NotificationRouter: NSObject, UNUserNotificationCenterDelegate {
+	func userNotificationCenter(
+		_ center: UNUserNotificationCenter,
+		willPresent notification: UNNotification
+	) async -> UNNotificationPresentationOptions {
+		[.banner, .sound]
+	}
+
+	func userNotificationCenter(
+		_ center: UNUserNotificationCenter,
+		didReceive response: UNNotificationResponse
+	) async {
+		let info = response.notification.request.content.userInfo
+		if info["confirm"] is String {
+			await AppState.shared.showConfirmation()
+		} else if let path = info["path"] as? String {
+			NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+		}
 	}
 }

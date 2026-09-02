@@ -13,31 +13,46 @@ struct StolnkApp: App {
 				.environmentObject(state)
 				.frame(width: 340)
 		} label: {
-			FileGoMenuBarIcon()
-				.frame(width: 20, height: 20)
+			MenuBarIcon()
 				.accessibilityLabel("Stolnk")
 		}
 		.menuBarExtraStyle(.window)
 	}
 }
 
-/// The FileGo folder-and-arrow mark. AppKit's template-image path is required
-/// here: blend modes inside a `MenuBarExtra` label can be flattened away by
-/// the system, leaving a fully transparent status item.
-private struct FileGoMenuBarIcon: View {
+/// The folder-and-arrow mark, monochrome. This is the app icon's mark without
+/// its background tile: a menu bar item is a template image, so only the alpha
+/// channel survives and the system recolours it for the light or dark menu bar.
+/// Pointing this at AppIcon.icns would draw a filled square — that artwork is
+/// fully opaque, and a template image keeps nothing but the silhouette.
+///
+/// AppKit's template-image path is required here: blend modes inside a
+/// `MenuBarExtra` label can be flattened away by the system, leaving a fully
+/// transparent status item.
+private struct MenuBarIcon: View {
+	/// The source mark intentionally has generous app-icon padding, so its
+	/// silhouette needs a slightly larger box than a bare SF Symbol would to
+	/// match the optical size of its neighbours in the menu bar. This is the
+	/// size the icon actually draws at — there is no separate frame to keep in
+	/// step with it.
+	private static let side: CGFloat = 23
+
 	private static let image: NSImage = {
+		// `Bundle.module`, not `Bundle.main`: running from Xcode or `swift run`
+		// produces a bare executable whose main bundle has no Resources
+		// directory, and the lookup would miss. The SF Symbol below is a last
+		// resort — a menu bar app with no icon at all cannot be clicked — but it
+		// should never be reached now that the resource is declared in
+		// Package.swift.
 		guard
-			let url = Bundle.main.url(forResource: "FileGoMenuBarIcon", withExtension: "png"),
+			let url = Bundle.module.url(forResource: "MenuBarIcon", withExtension: "png"),
 			let image = NSImage(contentsOf: url)
 		else {
 			return NSImage(systemSymbolName: "tray.and.arrow.down", accessibilityDescription: "Stolnk")
 				?? NSImage()
 		}
 		image.isTemplate = true
-		// The source mark intentionally has generous app-icon padding. Give the
-		// bitmap a larger intrinsic size so its visible silhouette matches the
-		// optical size of neighbouring macOS menu bar symbols.
-		image.size = NSSize(width: 23, height: 23)
+		image.size = NSSize(width: side, height: side)
 		return image
 	}()
 

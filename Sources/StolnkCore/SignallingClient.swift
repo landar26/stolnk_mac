@@ -26,6 +26,17 @@ public final class SignallingClient: NSObject, @unchecked Sendable {
 	private var reconnectAttempt = 0
 	private var stopped = true
 	private var keepalive: Timer?
+	/// When the server was last heard from. Every keepalive draws a "pong" out
+	/// of the Durable Object's auto-response pair, so this advances roughly once
+	/// per interval on a healthy socket.
+	private var lastInbound = Date.distantPast
+	/// Whether `.connected` has been reported for the current socket.
+	private var announcedConnected = false
+
+	private static let keepaliveInterval: TimeInterval = 45
+	/// Two missed keepalives. One can be lost to a hiccup; two means the socket
+	/// is not carrying frames any more.
+	private static let livenessTimeout: TimeInterval = 100
 
 	private let makeURL: @Sendable () async -> URL?
 	private let onEvent: @Sendable (Event) -> Void
@@ -88,9 +99,16 @@ public final class SignallingClient: NSObject, @unchecked Sendable {
 			self.task = task
 		}
 
+		lock.withLock {
+			lastInbound = Date()
+			announcedConnected = false
+		}
 		task.resume()
+		// `.connected` is deliberately not announced here. `resume()` only means
+		// the handshake was started; the Durable Object replying to "hello" is
+		// the first evidence that frames actually flow, and claiming otherwise
+		// makes a socket that never opened look healthy in the menu bar.
 		send(text: #"{"type":"hello"}"#)
-		onEvent(.connected)
 		startKeepalive()
 		receive()
 	}
@@ -100,11 +118,42 @@ public final class SignallingClient: NSObject, @unchecked Sendable {
 			guard let self else { return }
 			lock.lock()
 			keepalive?.invalidate()
-			keepalive = Timer.scheduledTimer(withTimeInterval: 45, repeats: true) { [weak self] _ in
-				// Matches the Durable Object's auto-response pair, so this never wakes it.
-				self?.send(text: "ping")
+			keepalive = Timer.scheduledTimer(
+				withTimeInterval: Self.keepaliveInterval, repeats: true
+			) { [weak self] _ in
+				self?.keepaliveTick()
 			}
 			lock.unlock()
+		}
+	}
+
+	/**
+	 Heartbeat, and the only thing that notices a socket which has quietly died.
+
+	 A WebSocket carried by a proxy — or by a network that dropped the flow —
+	 can stop delivering frames while TCP still reports the connection as
+	 established. Nothing throws, `receive` never fails, and the app sits there
+	 believing it is online while every push goes into a hole; files then wait
+	 out the polling interval and it looks like nothing was sent. So silence is
+	 treated as the failure it is, rather than waited on.
+	 */
+	private func keepaliveTick() {
+		lock.lock()
+		let current = task
+		let silentFor = Date().timeIntervalSince(lastInbound)
+		lock.unlock()
+		guard let current else { return }
+
+		if silentFor > Self.livenessTimeout {
+			current.cancel(with: .goingAway, reason: nil)
+			scheduleReconnect()
+			return
+		}
+
+		// Matches the Durable Object's auto-response pair, so this never wakes it.
+		current.send(.string("ping")) { [weak self] error in
+			guard error != nil else { return }
+			self?.scheduleReconnect()
 		}
 	}
 
@@ -125,6 +174,12 @@ public final class SignallingClient: NSObject, @unchecked Sendable {
 			guard let self else { return }
 			switch result {
 			case .success(let message):
+				let firstFrame: Bool = lock.withLock {
+					defer { lastInbound = Date(); announcedConnected = true }
+					return !announcedConnected
+				}
+				// The server answering at all is what proves the socket works.
+				if firstFrame { onEvent(.connected) }
 				if case .string(let text) = message { handle(text: text) }
 				receive()
 			case .failure:
@@ -151,10 +206,19 @@ public final class SignallingClient: NSObject, @unchecked Sendable {
 
 	private func scheduleReconnect() {
 		lock.lock()
+		// A dead socket can be reported twice — a failed `receive` and a failed
+		// keepalive send race each other. Without this the losers each start
+		// their own reconnect and the device ends up with several sockets, all
+		// of which the Durable Object counts as "online".
+		guard task != nil else {
+			lock.unlock()
+			return
+		}
 		let isStopped = stopped
 		reconnectAttempt = min(reconnectAttempt + 1, 6)
 		let attempt = reconnectAttempt
 		task = nil
+		announcedConnected = false
 		keepalive?.invalidate()
 		keepalive = nil
 		lock.unlock()

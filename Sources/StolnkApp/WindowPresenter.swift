@@ -13,10 +13,16 @@ import SwiftUI
 @MainActor
 final class WindowPresenter {
 	private var windows: [String: NSWindow] = [:]
+	/// `NSWindow.delegate` is weak, so the observers have to be held here.
+	private var observers: [String: CloseObserver] = [:]
 
+	/// `onClose` fires only when the *user* closes the window, never when
+	/// `close(id:)` takes it down. A window that waits on an answer has to know
+	/// it was dismissed, or whoever is awaiting that answer waits forever.
 	func show<Content: View>(
 		id: String,
 		title: String,
+		onClose: (() -> Void)? = nil,
 		@ViewBuilder content: () -> Content
 	) {
 		if let existing = windows[id] {
@@ -33,16 +39,42 @@ final class WindowPresenter {
 		window.center()
 		windows[id] = window
 
+		if let onClose {
+			let observer = CloseObserver { [weak self] in
+				self?.windows[id] = nil
+				self?.observers[id] = nil
+				onClose()
+			}
+			observers[id] = observer
+			window.delegate = observer
+		}
+
 		window.makeKeyAndOrderFront(nil)
 		NSApp.activate(ignoringOtherApps: true)
 	}
 
 	func close(id: String) {
+		// Detach first: closing programmatically is not a dismissal, and letting
+		// it reach `onClose` would resolve the very decision we just resolved.
+		windows[id]?.delegate = nil
+		observers[id] = nil
 		windows[id]?.close()
 		windows[id] = nil
 	}
 
 	func isOpen(id: String) -> Bool {
 		windows[id] != nil
+	}
+}
+
+private final class CloseObserver: NSObject, NSWindowDelegate {
+	private let onClose: () -> Void
+
+	init(onClose: @escaping () -> Void) {
+		self.onClose = onClose
+	}
+
+	func windowWillClose(_ notification: Notification) {
+		MainActor.assumeIsolated { onClose() }
 	}
 }

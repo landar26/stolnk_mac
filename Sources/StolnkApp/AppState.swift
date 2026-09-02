@@ -58,6 +58,9 @@ struct ConfirmationRequest: Identifiable {
 	let file: PendingFile
 	let filename: String
 	let continuation: CheckedContinuation<ConfirmationDecision, Never>
+	/// Resolves the request as `.postpone` if it is left unattended, so a
+	/// forgotten prompt cannot hold the receiver open indefinitely.
+	let watchdog: Task<Void, Never>
 }
 
 @MainActor
@@ -94,7 +97,7 @@ final class AppState: ObservableObject {
 	var origin: URL {
 		let state = store.snapshot
 		return URL(string: "\(state.scheme)://\(state.baseHost)")
-			?? URL(string: "http://localhost:5173")!
+			?? URL(string: "\(StoredState.defaultScheme)://\(StoredState.defaultBaseHost)")!
 	}
 
 	/// `.stolnk.com` — what a name field shows after the box being typed into.
@@ -146,7 +149,15 @@ final class AppState: ObservableObject {
 				name = saved.name
 				try await client.authenticate()
 				await persistToken()
-				needsOnboarding = !saved.hasCompletedOnboarding
+				// A device with a name has been through onboarding by definition —
+				// the name and the first inbox are the only things it produces.
+				// Trusting the flag alone meant that closing the last screen
+				// instead of pressing Done left it false forever, and a fully
+				// set-up Mac was greeted with "Welcome to Stolnk" on every launch.
+				needsOnboarding = saved.name == nil
+				if !needsOnboarding, !saved.hasCompletedOnboarding {
+					store.mutate { $0.hasCompletedOnboarding = true }
+				}
 			} else {
 				needsOnboarding = true
 			}
@@ -292,8 +303,24 @@ final class AppState: ObservableObject {
 
 	// MARK: - Windows
 
+	/// Closing the window counts as finishing it, but only once there is
+	/// something to come back to. Dismissed mid-registration the flag is left
+	/// alone, so the next launch offers setup again rather than handing over a
+	/// menu bar with no address in it.
+	private func onboardingDismissed() {
+		guard store.snapshot.name != nil else {
+			needsOnboarding = true
+			return
+		}
+		completeOnboarding()
+	}
+
 	func showOnboarding() {
-		presenter.show(id: "onboarding", title: "Welcome to Stolnk") {
+		presenter.show(
+			id: "onboarding",
+			title: "Welcome to Stolnk",
+			onClose: { [weak self] in self?.onboardingDismissed() }
+		) {
 			OnboardingView(mode: .firstRun).environmentObject(self)
 		}
 	}
@@ -368,20 +395,56 @@ final class AppState: ObservableObject {
 
 	private func askForConfirmation(file: PendingFile, filename: String) async -> ConfirmationDecision {
 		await withCheckedContinuation { continuation in
-			confirmation = ConfirmationRequest(
-				id: file.fileID, file: file, filename: filename, continuation: continuation)
-			presenter.show(id: "confirm", title: "Incoming files") {
-				ConfirmationView().environmentObject(self)
+			let watchdog = Task { [weak self] in
+				try? await Task.sleep(nanoseconds: Self.confirmationWatchdog)
+				guard !Task.isCancelled else { return }
+				self?.resolveConfirmation(.postpone)
 			}
+			confirmation = ConfirmationRequest(
+				id: file.fileID,
+				file: file,
+				filename: filename,
+				continuation: continuation,
+				watchdog: watchdog
+			)
+			// The window can be missed — behind another app, on another Space —
+			// so the menu bar and a notification carry the same news.
+			status = .waiting(count: 1)
+			notifier.awaitingConfirmation(
+				name: filename, inboxName: file.inboxName, fileID: file.fileID)
+			showConfirmation()
 		}
 	}
 
+	/// Raises the pending prompt, or brings it back after it was dismissed.
+	/// Reachable from the menu bar and from the notification.
+	func showConfirmation() {
+		guard confirmation != nil else { return }
+		presenter.show(
+			id: "confirm",
+			title: "Incoming files",
+			onClose: { [weak self] in self?.resolveConfirmation(.postpone) }
+		) {
+			ConfirmationView().environmentObject(self)
+		}
+	}
+
+	/// Idempotent and re-entrant: `presenter.close` detaches the window
+	/// delegate before closing, and `confirmation` is cleared first, so a
+	/// second call — from the watchdog, or from a close that races a click —
+	/// finds nothing to do.
 	func resolveConfirmation(_ decision: ConfirmationDecision) {
 		guard let request = confirmation else { return }
 		confirmation = nil
+		request.watchdog.cancel()
 		presenter.close(id: "confirm")
+		if case .receiving = status {} else { status = .ready }
 		request.continuation.resume(returning: decision)
 	}
+
+	/// Shorter than `Receiver`'s own deadline, so this is the path that
+	/// normally reclaims an unattended prompt and the backstop stays unused.
+	private static let confirmationWatchdog: UInt64 = 15 * 60 * 1_000_000_000
 
 	// MARK: - Delivery
 
