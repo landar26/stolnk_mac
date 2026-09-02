@@ -18,6 +18,11 @@ struct MenuBarView: View {
 				awaitingConfirmation
 			}
 
+			if state.plan?.relayExhausted == true {
+				Divider()
+				allowanceSpent
+			}
+
 			Divider()
 
 			ScrollView {
@@ -79,6 +84,35 @@ struct MenuBarView: View {
 			}
 		}
 		.padding(12)
+	}
+
+	/**
+	 PRD 16.2 — the allowance ran out.
+
+	 Stated as a plan fact with a date on it, and never as "offline" or as an
+	 error. Those are what the user would otherwise conclude from links that stop
+	 accepting files, and both would send them looking for a fault that is not
+	 there. The promise being kept here is that the inbox never *looks* broken.
+	 */
+	private var allowanceSpent: some View {
+		HStack(spacing: 8) {
+			Image(systemName: "gauge.with.dots.needle.0percent")
+				.foregroundStyle(.orange)
+			VStack(alignment: .leading, spacing: 1) {
+				Text("Relay allowance used up").font(.callout)
+				Text(
+					state.plan?.isPro == true
+						? "Links start accepting files again on the 1st."
+						: "Links start accepting files again on the 1st. Pro raises this to 300 GB."
+				)
+				.font(.caption)
+				.foregroundStyle(.secondary)
+				.fixedSize(horizontal: false, vertical: true)
+			}
+			Spacer()
+		}
+		.padding(.horizontal, 12)
+		.padding(.bottom, 8)
 	}
 
 	/// The prompt is a separate window, so it can end up behind another app or

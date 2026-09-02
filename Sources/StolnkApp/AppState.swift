@@ -50,6 +50,7 @@ enum ConnectionStatus: Equatable {
 /// on is a decision the caller makes.
 enum SettingsTab: Hashable {
 	case links
+	case plan
 	case general
 }
 
@@ -61,6 +62,13 @@ struct ConfirmationRequest: Identifiable {
 	/// Resolves the request as `.postpone` if it is left unattended, so a
 	/// forgotten prompt cannot hold the receiver open indefinitely.
 	let watchdog: Task<Void, Never>
+}
+
+/// A refused action, phrased as what Pro would allow.
+struct UpgradePrompt: Identifiable {
+	let id = UUID()
+	let title: String
+	let message: String
 }
 
 @MainActor
@@ -82,6 +90,16 @@ final class AppState: ObservableObject {
 	/// because `WindowPresenter` reuses the window: opening Settings a second time
 	/// does not rebuild the view, so a constructor argument would be ignored.
 	@Published var selectedInboxID: String?
+
+	/// PRD 16 — the tier and this month's usage, as the server reports them.
+	/// Optional because "not asked yet" and "Free" are different things, and
+	/// showing a Pro user "Free" for a moment on launch would be a lie.
+	@Published private(set) var plan: PlanState?
+
+	/// Set when an action was refused for want of Pro. Drives a sheet rather than
+	/// the general error line: PRD 6.2 wants this moment to read as an offer, and
+	/// it is also the funnel's most informative event (PRD 15.4).
+	@Published var upgradePrompt: UpgradePrompt?
 
 	let store = InboxStore()
 	private var identityKeys: DeviceIdentity?
@@ -167,6 +185,7 @@ final class AppState: ObservableObject {
 			buildReceiver(api: client, keys: keys)
 			if saved.deviceID != nil {
 				await refreshInboxes()
+				await refreshPlan()
 				connectSignalling()
 				await poll()
 				startPolling()
@@ -509,6 +528,9 @@ final class AppState: ObservableObject {
 		if case .receiving = status {} else {
 			status = socketConnected ? .ready : .connecting
 		}
+		// Files that just landed spent someone's allowance, so the plan rides
+		// along with the poll rather than getting a timer of its own.
+		await refreshPlan()
 	}
 
 	private func revealIfAppropriate(_ files: [LandedFile]) {
@@ -519,6 +541,72 @@ final class AppState: ObservableObject {
 		guard shouldReveal, let first = files.first else { return }
 		store.mutate { $0.hasOpenedFinderOnce = true }
 		NSWorkspace.shared.activateFileViewerSelecting([first.fileURL])
+	}
+
+	// MARK: - Licensing (PRD 16)
+
+	/// Where the licence key is kept so a seat can be released later without
+	/// making someone dig the email out again. It is a credential, so it goes in
+	/// the keychain rather than the settings file.
+	private static let licenseKeyAccount = "license-key"
+
+	var storedLicenseKey: String? {
+		guard case let .found(data) = Keychain.read(Self.licenseKeyAccount) else { return nil }
+		return String(data: data, encoding: .utf8)
+	}
+
+    /// Never surfaces an error. The plan is decoration on every screen that shows
+    /// it — a failed refresh should leave the last known answer standing, not
+    /// replace the Settings pane with a network complaint.
+	func refreshPlan() async {
+		guard let api else { return }
+		plan = try? await api.plan()
+	}
+
+	func activateLicense(key: String) async -> String? {
+		guard let api else { return "Not connected." }
+		let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !trimmed.isEmpty else { return "Enter your licence key." }
+		do {
+			plan = try await api.activateLicense(key: trimmed)
+			Keychain.write(Self.licenseKeyAccount, Data(trimmed.utf8))
+			// Pro raises the per-file ceiling on links that already exist, and the
+			// list carries `sizeLimit`, so it is stale until this runs.
+			await refreshInboxes()
+			return nil
+		} catch let error as APIError {
+			return error.message
+		} catch {
+			return error.localizedDescription
+		}
+	}
+
+	/// Hands this Mac's seat back so another one can take it.
+	///
+	/// The key is sent rather than the session (PRD 7.2): the same endpoint has
+	/// to work for a Mac that no longer exists, so it cannot depend on one being
+	/// able to authenticate.
+	func releaseSeat() async -> String? {
+		guard let api, let deviceID = store.snapshot.deviceID else { return "Not connected." }
+		guard let key = storedLicenseKey else {
+			return "This Mac does not have a licence key saved. Release it from your Creem receipt instead."
+		}
+		do {
+			try await api.releaseLicense(key: key, deviceID: deviceID)
+			Keychain.delete(Self.licenseKeyAccount)
+			await refreshPlan()
+			await refreshInboxes()
+			return nil
+		} catch let error as APIError {
+			return error.message
+		} catch {
+			return error.localizedDescription
+		}
+	}
+
+	func openPurchasePage() {
+		guard let api else { return }
+		NSWorkspace.shared.open(api.purchaseURL())
 	}
 
 	// MARK: - Inbox management
@@ -549,10 +637,15 @@ final class AppState: ObservableObject {
 			let inbox = try await api.createInbox(slug: slug, displayName: displayName)
 			store.bind(inboxID: inbox.inboxID, to: folder)
 			await refreshInboxes()
-		} catch let error as APIError where error.status == 402 {
+		} catch let error as APIError where error.isUpgradeRequired {
 			// PRD 6.2 — the wall sits at the end of the flow on purpose, so the
-			// intent is recorded even when the user does not convert.
-			lastError = error.message
+			// intent is recorded even when the user does not convert. Shown as a
+			// sheet because at this exact moment the user has just told us what
+			// they want; a red line under a form is the wrong reply to that.
+			upgradePrompt = UpgradePrompt(
+				title: "One folder per Mac on Free",
+				message: error.message
+			)
 		} catch {
 			handle(error)
 		}

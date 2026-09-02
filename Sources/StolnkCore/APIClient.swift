@@ -120,6 +120,43 @@ public actor APIClient {
 		return response.available
 	}
 
+	// MARK: - Licensing (PRD 16)
+
+	/// The tier and this month's usage. Cheap, and the only thing the app trusts
+	/// on the subject — there is no local notion of "I am Pro".
+	public func plan() async throws -> PlanState {
+		try await send("GET", "/api/v1/licenses/status")
+	}
+
+	/// Claims a seat for this Mac. The key goes to our own server, which holds
+	/// the Creem credentials; nothing in this app can talk to Creem directly, and
+	/// no API key ships inside a downloadable binary.
+	public func activateLicense(key: String) async throws -> PlanState {
+		try await send("POST", "/api/v1/licenses/activate", body: ["key": key])
+	}
+
+	/// Releases a seat.
+	///
+	/// Authenticated by the key rather than by the session, deliberately: PRD 7.2
+	/// means a Mac that is lost or dead can never sign anything again, so a seat
+	/// that could only be freed by its own device would be stranded forever. The
+	/// same call therefore works for *this* Mac and for one that is gone.
+	public func releaseLicense(key: String, deviceID: String) async throws {
+		struct Response: Codable { let released: Bool }
+		let _: Response = try await send(
+			"POST", "/api/v1/licenses/deactivate",
+			body: ["key": key, "device_id": deviceID],
+			authenticated: false
+		)
+	}
+
+	/// Where to send someone who wants to buy. The Worker redirects to the
+	/// checkout, so the price, the early-bird code and the provider can all
+	/// change without shipping a new build.
+	public nonisolated func purchaseURL() -> URL {
+		origin.appendingPathComponent("api/v1/checkout")
+	}
+
 	// MARK: - Delivery
 
 	public func pending() async throws -> PendingResponse {

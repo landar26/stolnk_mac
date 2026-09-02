@@ -62,6 +62,15 @@ struct OnboardingView: View {
 		}
 		.padding(28)
 		.frame(width: 460)
+		// The New Inbox flow is its own window, so the paywall has to be able to
+		// appear here as well as in Settings — this is where someone is standing
+		// when they hit it (PRD 6.2: the wall sits at the end of the flow).
+		.sheet(item: $state.upgradePrompt) { prompt in
+			UpgradeSheet(prompt: prompt) {
+				state.upgradePrompt = nil
+				state.closeNewInbox()
+			}
+		}
 	}
 
 	private var chooseFolderStep: some View {
@@ -246,7 +255,12 @@ struct OnboardingView: View {
 							folder: folder
 						)
 						busy = false
-						if state.lastError == nil { state.closeNewInbox() }
+						// An upgrade prompt is a pending conversation, not a
+						// finished one: closing the window out from under it would
+						// leave the refusal with nowhere to be shown.
+						if state.lastError == nil, state.upgradePrompt == nil {
+							state.closeNewInbox()
+						}
 					}
 				}
 				.keyboardShortcut(.defaultAction)
