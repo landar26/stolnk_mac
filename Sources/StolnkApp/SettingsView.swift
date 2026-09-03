@@ -275,6 +275,15 @@ private struct GeneralSettings: View {
 					.font(.caption)
 					.foregroundStyle(.secondary)
 			}
+
+			Section("About") {
+				// The one number that has to match what stolnk.com/download is
+				// serving. Read from the bundle rather than compiled in, so it
+				// cannot disagree with Scripts/bundle.sh's Info.plist — which
+				// takes it from stolnk_mac/VERSION, the same file the dmg is
+				// named after.
+				LabeledContent("Version", value: Self.version)
+			}
 		}
 		.formStyle(.grouped)
 		.onAppear {
@@ -284,6 +293,11 @@ private struct GeneralSettings: View {
 			openFinderEveryTime = snapshot.openFinderEveryTime
 			name = state.name ?? ""
 		}
+	}
+
+	/// "1.0.0", or "unknown" for a bare `swift run` build with no bundle.
+	private static var version: String {
+		Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
 	}
 
 	private func rename() {
