@@ -118,6 +118,7 @@ private struct InboxLinkDetail: View {
 	@State private var qrTarget: InboxSummary?
 	@State private var copied = false
 	@State private var confirmingReset = false
+	@State private var confirmingClear = false
 	@State private var confirmingDelete = false
 	@State private var path = ""
 	@State private var savingPath = false
@@ -138,6 +139,13 @@ private struct InboxLinkDetail: View {
 					Text(error)
 						.font(.caption)
 						.foregroundStyle(.orange)
+						.fixedSize(horizontal: false, vertical: true)
+				}
+
+				if let notice = state.lastNotice {
+					Text(notice)
+						.font(.caption)
+						.foregroundStyle(.secondary)
 						.fixedSize(horizontal: false, vertical: true)
 				}
 			}
@@ -167,6 +175,21 @@ private struct InboxLinkDetail: View {
 		} message: {
 			Text(
 				"\(inbox.url) stops working immediately — anyone who already has it gets a \"not found\" page, and there is no way to bring it back. This inbox gives that path up and takes a new one; your name does not change.\n\nFiles already on their way are unaffected."
+			)
+		}
+		.alert("Clear records for “\(inbox.displayName)”?", isPresented: $confirmingClear) {
+			Button("Cancel", role: .cancel) {}
+			Button("Clear Records") {
+				Task { await state.clearInboxTransfers(inbox) }
+			}
+		} message: {
+			Text(
+				"""
+				Deletes what the server still remembers about files already \
+				delivered here: their sizes, when they arrived, and their encrypted \
+				names. Files on this Mac are not touched, and anything still on its \
+				way is left alone.
+				"""
 			)
 		}
 		.alert("Delete “\(inbox.displayName)”?", isPresented: $confirmingDelete) {
@@ -294,15 +317,16 @@ private struct InboxLinkDetail: View {
 
 	private var dangerZone: some View {
 		VStack(alignment: .leading, spacing: 10) {
-			Text("Revoking access").font(.callout.weight(.medium))
+			Text("Revoking and forgetting").font(.callout.weight(.medium))
 
 			HStack(spacing: 8) {
 				Button("Reset Link…") { confirmingReset = true }
+				Button("Clear Records…") { confirmingClear = true }
 				Button("Delete Inbox…", role: .destructive) { confirmingDelete = true }
 			}
 			.controlSize(.small)
 
-			Text("Reset keeps the inbox and changes its address. Delete removes it entirely, freeing the address for a new one.")
+			Text("Reset keeps the inbox and changes its address. Clear Records forgets what was sent here, keeping both. Delete removes it entirely, freeing the address for a new one.")
 				.font(.caption)
 				.foregroundStyle(.secondary)
 				.fixedSize(horizontal: false, vertical: true)

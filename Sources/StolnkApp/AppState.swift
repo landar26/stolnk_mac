@@ -85,6 +85,11 @@ final class AppState: ObservableObject {
 	@Published var confirmation: ConfirmationRequest?
 	@Published var needsOnboarding = false
 	@Published var lastError: String?
+	/// The counterpart to `lastError`, for an action whose success is otherwise
+	/// invisible. Clearing transfer records is the only one: there is no history
+	/// screen for the result to show up in, so without this the button looks
+	/// broken when it works.
+	@Published var lastNotice: String?
 	@Published var settingsTab: SettingsTab = .links
 	/// Which inbox the Links tab has selected. Lives here rather than in the view
 	/// because `WindowPresenter` reuses the window: opening Settings a second time
@@ -696,11 +701,32 @@ final class AppState: ObservableObject {
 		guard let api else { return }
 		do {
 			lastError = nil
+			lastNotice = nil
 			_ = try await api.resetInbox(inbox.inboxID)
 		} catch {
 			handle(error)
 		}
 		await refreshInboxes()
+	}
+
+	/// Forget this inbox's finished transfers and keep its address.
+	///
+	/// Deleting the inbox already cleared its records, but only by giving up the
+	/// link — this is the same clearing without that cost. Files already landed
+	/// in the folder are not involved: they are on disk and this never touches
+	/// disk. Anything still in flight is left alone by the server.
+	func clearInboxTransfers(_ inbox: InboxSummary) async {
+		guard let api else { return }
+		do {
+			lastError = nil
+			lastNotice = nil
+			let cleared = try await api.clearInboxTransfers(inbox.inboxID)
+			lastNotice = cleared == 1
+				? "Cleared 1 transfer record. Files already received are untouched."
+				: "Cleared \(cleared) transfer records. Files already received are untouched."
+		} catch {
+			handle(error)
+		}
 	}
 
 	/// The server refuses to delete the default inbox (PRD 6.2), so the failure
@@ -710,6 +736,7 @@ final class AppState: ObservableObject {
 		guard let api else { return }
 		do {
 			lastError = nil
+			lastNotice = nil
 			try await api.deleteInbox(inbox.inboxID)
 			store.unbind(inboxID: inbox.inboxID)
 			await receiver?.clearPauseMemo(for: inbox.inboxID)

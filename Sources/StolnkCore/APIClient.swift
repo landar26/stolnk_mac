@@ -104,6 +104,16 @@ public actor APIClient {
 		let _: Response = try await send("DELETE", "/api/v1/inboxes/\(inboxID)")
 	}
 
+	/// Forget this inbox's finished transfers, keeping the inbox and its address.
+	/// Anything still in flight is left alone by the server. Returns how many
+	/// records went, which is the only feedback the action can give: there is no
+	/// history screen for the result to be visible in.
+	public func clearInboxTransfers(_ inboxID: String) async throws -> Int {
+		struct Response: Codable { let cleared: Int }
+		let response: Response = try await send("DELETE", "/api/v1/inboxes/\(inboxID)/transfers")
+		return response.cleared
+	}
+
 	/// Renaming. Every link moves with the name, so the server hands back the
 	/// whole list rather than making the caller refresh.
 	public func rename(to name: String) async throws -> [InboxSummary] {
