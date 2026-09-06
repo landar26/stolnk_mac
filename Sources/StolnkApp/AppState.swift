@@ -10,7 +10,6 @@ enum ConnectionStatus: Equatable {
 	case connecting
 	case ready
 	case receiving(progress: Double)
-	case waiting(count: Int)
 	case paused
 	case offline
 
@@ -19,7 +18,6 @@ enum ConnectionStatus: Equatable {
 		case .connecting: "Connecting"
 		case .ready: "Ready"
 		case .receiving(let progress): "Receiving \(Int(progress * 100))%"
-		case .waiting(let count): "\(count) waiting"
 		case .paused: "Paused"
 		case .offline: "Offline"
 		}
@@ -30,7 +28,6 @@ enum ConnectionStatus: Equatable {
 		case .connecting: "circle.dotted"
 		case .ready: "circle.fill"
 		case .receiving: "arrow.down.circle.fill"
-		case .waiting: "envelope.fill"
 		case .paused: "pause.circle.fill"
 		case .offline: "circle"
 		}
@@ -39,7 +36,7 @@ enum ConnectionStatus: Equatable {
 	var tint: Color {
 		switch self {
 		case .ready: .green
-		case .receiving, .waiting: .accentColor
+		case .receiving: .accentColor
 		case .paused: .orange
 		case .connecting, .offline: .secondary
 		}
@@ -52,16 +49,6 @@ enum SettingsTab: Hashable {
 	case links
 	case plan
 	case general
-}
-
-struct ConfirmationRequest: Identifiable {
-	let id: String
-	let file: PendingFile
-	let filename: String
-	let continuation: CheckedContinuation<ConfirmationDecision, Never>
-	/// Resolves the request as `.postpone` if it is left unattended, so a
-	/// forgotten prompt cannot hold the receiver open indefinitely.
-	let watchdog: Task<Void, Never>
 }
 
 /// A refused action, phrased as what Pro would allow.
@@ -82,7 +69,6 @@ final class AppState: ObservableObject {
 	@Published private(set) var recent: [LandedFile] = []
 	@Published private(set) var isEnclaveBacked = false
 	@Published private(set) var name: String?
-	@Published var confirmation: ConfirmationRequest?
 	@Published var needsOnboarding = false
 	@Published var lastError: String?
 	/// The counterpart to `lastError`, for an action whose success is otherwise
@@ -375,10 +361,6 @@ final class AppState: ObservableObject {
 
 	private func buildReceiver(api: APIClient, keys: DeviceIdentity) {
 		let events = ReceiverEvents(
-			confirm: { [weak self] file, name in
-				guard let self else { return .decline }
-				return await self.askForConfirmation(file: file, filename: name)
-			},
 			progress: { [weak self] _, received, total in
 				Task { @MainActor [weak self] in
 					guard let self, total > 0 else { return }
@@ -414,61 +396,6 @@ final class AppState: ObservableObject {
 		)
 		receiver = Receiver(api: api, identity: keys, store: store, events: events)
 	}
-
-	// MARK: - Confirmation (PRD 13.2)
-
-	private func askForConfirmation(file: PendingFile, filename: String) async -> ConfirmationDecision {
-		await withCheckedContinuation { continuation in
-			let watchdog = Task { [weak self] in
-				try? await Task.sleep(nanoseconds: Self.confirmationWatchdog)
-				guard !Task.isCancelled else { return }
-				self?.resolveConfirmation(.postpone)
-			}
-			confirmation = ConfirmationRequest(
-				id: file.fileID,
-				file: file,
-				filename: filename,
-				continuation: continuation,
-				watchdog: watchdog
-			)
-			// The window can be missed — behind another app, on another Space —
-			// so the menu bar and a notification carry the same news.
-			status = .waiting(count: 1)
-			notifier.awaitingConfirmation(
-				name: filename, inboxName: file.inboxName, fileID: file.fileID)
-			showConfirmation()
-		}
-	}
-
-	/// Raises the pending prompt, or brings it back after it was dismissed.
-	/// Reachable from the menu bar and from the notification.
-	func showConfirmation() {
-		guard confirmation != nil else { return }
-		presenter.show(
-			id: "confirm",
-			title: "Incoming files",
-			onClose: { [weak self] in self?.resolveConfirmation(.postpone) }
-		) {
-			ConfirmationView().environmentObject(self)
-		}
-	}
-
-	/// Idempotent and re-entrant: `presenter.close` detaches the window
-	/// delegate before closing, and `confirmation` is cleared first, so a
-	/// second call — from the watchdog, or from a close that races a click —
-	/// finds nothing to do.
-	func resolveConfirmation(_ decision: ConfirmationDecision) {
-		guard let request = confirmation else { return }
-		confirmation = nil
-		request.watchdog.cancel()
-		presenter.close(id: "confirm")
-		if case .receiving = status {} else { status = .ready }
-		request.continuation.resume(returning: decision)
-	}
-
-	/// Shorter than `Receiver`'s own deadline, so this is the path that
-	/// normally reclaims an unattended prompt and the backstop stays unused.
-	private static let confirmationWatchdog: UInt64 = 15 * 60 * 1_000_000_000
 
 	// MARK: - Delivery
 
@@ -765,11 +692,6 @@ final class AppState: ObservableObject {
 			handle(error)
 			return false
 		}
-	}
-
-	func setAlwaysAccept(_ value: Bool) {
-		store.mutate { $0.alwaysAccept = value }
-		objectWillChange.send()
 	}
 
 	func setOpenFinderEveryTime(_ value: Bool) {

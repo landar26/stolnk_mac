@@ -1,34 +1,20 @@
 import CryptoKit
 import Foundation
 
-public enum ConfirmationDecision: Sendable {
-	case accept
-	case acceptAlways
-	case decline
-	/// Nobody answered — the window was closed, or the prompt went unattended.
-	/// Not a refusal: the file stays on the relay and is offered again on the
-	/// next poll. Declining on a dismissed window would throw away a stranger's
-	/// file on an accidental click.
-	case postpone
-}
-
 /// Callbacks into the UI. Closures rather than a delegate protocol so the app
 /// layer can bridge to the main actor at the boundary.
 public struct ReceiverEvents: Sendable {
-	public var confirm: @Sendable (PendingFile, String) async -> ConfirmationDecision
 	public var progress: @Sendable (String, Int, Int) -> Void
 	public var landed: @Sendable ([LandedFile]) -> Void
 	public var failed: @Sendable (PendingFile, String?, Error) -> Void
 	public var inboxUnavailable: @Sendable (String, String) -> Void
 
 	public init(
-		confirm: @escaping @Sendable (PendingFile, String) async -> ConfirmationDecision = { _, _ in .accept },
 		progress: @escaping @Sendable (String, Int, Int) -> Void = { _, _, _ in },
 		landed: @escaping @Sendable ([LandedFile]) -> Void = { _ in },
 		failed: @escaping @Sendable (PendingFile, String?, Error) -> Void = { _, _, _ in },
 		inboxUnavailable: @escaping @Sendable (String, String) -> Void = { _, _ in }
 	) {
-		self.confirm = confirm
 		self.progress = progress
 		self.landed = landed
 		self.failed = failed
@@ -51,9 +37,6 @@ public actor Receiver {
 	private let events: ReceiverEvents
 	private var inFlight = Set<String>()
 	private var pausedInboxes = Set<String>()
-	/// Longer than the app layer's own watchdog, so in a healthy build this
-	/// never fires and the user's own click always wins.
-	private let confirmationDeadline: UInt64
 
 	public private(set) var isRunning = false
 
@@ -61,10 +44,8 @@ public actor Receiver {
 		api: APIClient,
 		identity: DeviceIdentity,
 		store: InboxStore,
-		events: ReceiverEvents,
-		confirmationDeadline: UInt64 = 20 * 60 * 1_000_000_000
+		events: ReceiverEvents
 	) {
-		self.confirmationDeadline = confirmationDeadline
 		self.api = api
 		self.identity = identity
 		self.store = store
@@ -126,23 +107,6 @@ public actor Receiver {
 				events.inboxUnavailable(file.inboxID, file.inboxName)
 			}
 			return nil
-		}
-
-		if store.snapshot.alwaysAccept == false, file.needsConfirmation {
-			switch await confirm(file, named: safeName) {
-			case .decline:
-				try await api.decline(fileID: file.fileID)
-				return nil
-			case .postpone:
-				// Left on the relay deliberately. The next poll asks again.
-				return nil
-			case .accept:
-				try await api.accept(fileID: file.fileID, always: false)
-			case .acceptAlways:
-				try await api.accept(fileID: file.fileID, always: true)
-			}
-		} else if file.needsConfirmation {
-			try await api.accept(fileID: file.fileID, always: false)
 		}
 
 		try FileLanding.checkSpace(for: file.size, in: folder)
@@ -219,56 +183,7 @@ public actor Receiver {
 		return landed
 	}
 
-	/// Asks the UI, with a hard deadline.
-	///
-	/// The app layer runs its own, shorter watchdog; this is the backstop for
-	/// the case where it does not answer at all. Without it a prompt that is
-	/// never resolved suspends `receive` forever, `poll` never returns, and the
-	/// `isRunning` guard silently swallows every later poll — socket pushes,
-	/// the periodic timer, wake, launch — for the rest of the process. The
-	/// symptom is a Mac that accepts nothing at all and reports no error.
-	///
-	/// Deliberately not a task group: a group awaits every child before it
-	/// returns, so an ask that never answers would hang here exactly as it hung
-	/// before. The ask is abandoned instead — whenever it does finish, its
-	/// answer lands on a resolver that has already been settled and is
-	/// discarded.
-	private func confirm(_ file: PendingFile, named name: String) async -> ConfirmationDecision {
-		let outcome = FirstAnswer()
-		let asking = Task { [events] in await outcome.resolve(events.confirm(file, name)) }
-		let deadline = Task { [confirmationDeadline] in
-			try? await Task.sleep(nanoseconds: confirmationDeadline)
-			await outcome.resolve(.postpone)
-		}
-		defer {
-			asking.cancel()
-			deadline.cancel()
-		}
-		return await outcome.value
-	}
-
 	public func clearPauseMemo(for inboxID: String) {
 		pausedInboxes.remove(inboxID)
-	}
-}
-
-/// Settles once. Later answers — an abandoned prompt finally being clicked —
-/// are dropped rather than resuming a continuation twice.
-private actor FirstAnswer {
-	private var decision: ConfirmationDecision?
-	private var waiter: CheckedContinuation<ConfirmationDecision, Never>?
-
-	var value: ConfirmationDecision {
-		get async {
-			if let decision { return decision }
-			return await withCheckedContinuation { waiter = $0 }
-		}
-	}
-
-	func resolve(_ answer: ConfirmationDecision) {
-		guard decision == nil else { return }
-		decision = answer
-		waiter?.resume(returning: answer)
-		waiter = nil
 	}
 }

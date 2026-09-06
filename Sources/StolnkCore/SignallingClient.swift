@@ -17,7 +17,7 @@ public final class SignallingClient: NSObject, @unchecked Sendable {
 	public enum Event: Sendable {
 		case connected
 		case disconnected
-		case fileReady(fileID: String, needsConfirmation: Bool)
+		case fileReady(fileID: String)
 	}
 
 	private let lock = NSLock()
@@ -196,11 +196,7 @@ public final class SignallingClient: NSObject, @unchecked Sendable {
 		else { return }
 
 		if type == "file.ready", let fileID = object["file_id"] as? String {
-			onEvent(
-				.fileReady(
-					fileID: fileID,
-					needsConfirmation: object["needs_confirmation"] as? Bool ?? false
-				))
+			onEvent(.fileReady(fileID: fileID))
 		}
 	}
 

@@ -51,9 +51,8 @@ struct InboxLinksView: View {
 						.lineLimit(1)
 						.truncationMode(.middle)
 					HStack(spacing: 4) {
-							if inbox.paused { LinkBadge("Paused", tint: .orange) }
+						if inbox.paused { LinkBadge("Paused", tint: .orange) }
 						if inbox.hasPassword { LinkBadge("Password", tint: .accentColor) }
-						if inbox.confirmFirst { LinkBadge("Confirm first", tint: .secondary) }
 					}
 				}
 				.padding(.vertical, 2)

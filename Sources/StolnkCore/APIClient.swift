@@ -84,14 +84,12 @@ public actor APIClient {
 		_ inboxID: String,
 		displayName: String? = nil,
 		slug: String? = nil,
-		paused: Bool? = nil,
-		confirmFirst: Bool? = nil
+		paused: Bool? = nil
 	) async throws -> InboxSummary {
 		var body: [String: Any] = [:]
 		if let displayName { body["display_name"] = displayName }
 		if let slug { body["slug"] = slug }
 		if let paused { body["paused"] = paused }
-		if let confirmFirst { body["confirm_first"] = confirmFirst }
 		return try await send("PATCH", "/api/v1/inboxes/\(inboxID)", body: body)
 	}
 
@@ -171,17 +169,6 @@ public actor APIClient {
 
 	public func pending() async throws -> PendingResponse {
 		try await send("GET", "/api/v1/pending")
-	}
-
-	public func accept(fileID: String, always: Bool) async throws {
-		struct Response: Codable { let accepted: Bool }
-		let _: Response = try await send(
-			"POST", "/api/v1/files/\(fileID)/accept", body: ["always": always])
-	}
-
-	public func decline(fileID: String) async throws {
-		struct Response: Codable { let declined: Bool }
-		let _: Response = try await send("POST", "/api/v1/files/\(fileID)/decline")
 	}
 
 	/// Deleting the relay object is the server's synchronous response to this

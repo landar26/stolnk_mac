@@ -8,7 +8,6 @@ public struct InboxSummary: Codable, Identifiable, Sendable, Hashable {
 	public let url: String
 	public let displayName: String
 	public let paused: Bool
-	public let confirmFirst: Bool
 	public let sizeLimit: Int
 	public let hasPassword: Bool
 
@@ -20,7 +19,6 @@ public struct InboxSummary: Codable, Identifiable, Sendable, Hashable {
 		case url
 		case displayName = "display_name"
 		case paused
-		case confirmFirst = "confirm_first"
 		case sizeLimit = "size_limit"
 		case hasPassword = "has_password"
 	}
@@ -56,8 +54,6 @@ public struct PendingFile: Codable, Sendable, Identifiable, Hashable {
 	public let transferID: String
 	public let inboxID: String
 	public let inboxName: String
-	public let senderSession: String
-	public let needsConfirmation: Bool
 	public let encName: String
 	public let nameIV: String
 	public let size: Int
@@ -77,8 +73,6 @@ public struct PendingFile: Codable, Sendable, Identifiable, Hashable {
 		case transferID = "transfer_id"
 		case inboxID = "inbox_id"
 		case inboxName = "inbox_name"
-		case senderSession = "sender_session"
-		case needsConfirmation = "needs_confirmation"
 		case encName = "enc_name"
 		case nameIV = "name_iv"
 		case size

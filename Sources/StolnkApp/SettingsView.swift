@@ -209,7 +209,6 @@ private struct PlanSettings: View {
 private struct GeneralSettings: View {
 	@EnvironmentObject private var state: AppState
 	@State private var origin = ""
-	@State private var alwaysAccept = false
 	@State private var openFinderEveryTime = false
 	@State private var name = ""
 	@State private var nameStatus: NameStatus = .empty
@@ -240,12 +239,6 @@ private struct GeneralSettings: View {
 			}
 
 			Section("Receiving") {
-				Toggle("Accept files without asking", isOn: $alwaysAccept)
-					.onChange(of: alwaysAccept) { value in state.setAlwaysAccept(value) }
-				Text("Stolnk normally asks once per sender before writing anything to disk. Turning this off means files land silently.")
-					.font(.caption)
-					.foregroundStyle(.secondary)
-
 				Toggle("Reveal in Finder after every file", isOn: $openFinderEveryTime)
 					.onChange(of: openFinderEveryTime) { value in
 						state.setOpenFinderEveryTime(value)
@@ -289,7 +282,6 @@ private struct GeneralSettings: View {
 		.onAppear {
 			let snapshot = state.store.snapshot
 			origin = state.origin.absoluteString
-			alwaysAccept = snapshot.alwaysAccept
 			openFinderEveryTime = snapshot.openFinderEveryTime
 			name = state.name ?? ""
 		}

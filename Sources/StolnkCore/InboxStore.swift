@@ -57,8 +57,6 @@ public struct StoredState: Codable, Sendable {
 	public var inboxes: [InboxSummary] = []
 	public var recent: [LandedFile] = []
 	public var hasCompletedOnboarding = false
-	/// PRD 13.2 — the escape hatch for users who find the prompt tiresome.
-	public var alwaysAccept = false
 	/// PRD 14 — Finder opens once, on the first successful receive, as proof it
 	/// worked. After that it would just be a machine stealing focus.
 	public var hasOpenedFinderOnce = false

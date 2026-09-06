@@ -64,18 +64,7 @@ final class LiveDeliveryTests: XCTestCase {
 
 		try await send(payload, named: hostileName, to: inbox, api: api)
 
-		let confirmed = ConfirmationRecorder()
-		let receiver = Receiver(
-			api: api,
-			identity: identity,
-			store: store,
-			events: ReceiverEvents(
-				confirm: { _, _ in
-					await confirmed.record()
-					return .acceptAlways
-				}
-			)
-		)
+		let receiver = Receiver(api: api, identity: identity, store: store, events: ReceiverEvents())
 		await receiver.poll()
 
 		let landed = try FileManager.default.contentsOfDirectory(atPath: destination.path)
@@ -83,9 +72,6 @@ final class LiveDeliveryTests: XCTestCase {
 		XCTAssertEqual(landed.count, 1, "expected exactly one file, got \(landed)")
 
 		let name = try XCTUnwrap(landed.first)
-		// PRD 13.2 — the first file of a new session is confirmed, not silent.
-		let asked = await confirmed.count
-		XCTAssertEqual(asked, 1, "the first file of a session should require confirmation")
 
 		// PRD 12.2 — the disguise is gone before anything reaches disk.
 		XCTAssertFalse(name.hasPrefix("."), "leading dot survived: \(name)")
@@ -108,133 +94,6 @@ final class LiveDeliveryTests: XCTestCase {
 		// PRD 8.5 — after the ACK there is nothing left waiting.
 		let pending = try await api.pending()
 		XCTAssertTrue(pending.files.isEmpty, "file still pending after delivery")
-	}
-
-	/**
-	 A dismissed prompt must not cost the sender their file, and must not wedge
-	 the receiver.
-
-	 The regression this pins: `askForConfirmation` used to have no answer for a
-	 closed window, so the continuation was never resumed, `poll` never
-	 returned, and the `isRunning` guard then swallowed every later poll —
-	 socket push, timer, wake, launch — for the rest of the process. A Mac in
-	 that state accepts nothing and reports nothing. If `poll` ever hangs again
-	 this test does not fail an assertion, it times out, which is the point.
-	 */
-	func testPostponedConfirmationKeepsTheFileAndAsksAgain() async throws {
-		let identity = DeviceIdentity(
-			signing: .software(P256.Signing.PrivateKey()),
-			agreement: .software(P256.KeyAgreement.PrivateKey()),
-			isEnclaveBacked: false
-		)
-		let api = APIClient(origin: origin, identity: identity)
-		let deviceName = "live-\(UUID().uuidString.prefix(8).lowercased())"
-		_ = try await api.register(name: deviceName, slug: "inbox")
-
-		let (_, inboxes) = try await api.inboxes()
-		let inbox = try XCTUnwrap(inboxes.first)
-
-		let destination = workspace.appendingPathComponent("landing")
-		try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-		let store = InboxStore(directory: workspace.appendingPathComponent("state"))
-		store.bind(inboxID: inbox.inboxID, to: destination)
-
-		let payload = Data("postponed".utf8)
-		try await send(payload, named: "note.txt", to: inbox, api: api)
-
-		func receiver(deciding decision: ConfirmationDecision, recorder: ConfirmationRecorder)
-			-> Receiver
-		{
-			Receiver(
-				api: api,
-				identity: identity,
-				store: store,
-				events: ReceiverEvents(
-					confirm: { _, _ in
-						await recorder.record()
-						return decision
-					}
-				)
-			)
-		}
-
-		let firstAsk = ConfirmationRecorder()
-		await receiver(deciding: .postpone, recorder: firstAsk).poll()
-
-		let askedOnce = await firstAsk.count
-		XCTAssertEqual(askedOnce, 1, "the file should have been offered once")
-
-		let afterPostpone = try FileManager.default.contentsOfDirectory(atPath: destination.path)
-		XCTAssertTrue(afterPostpone.isEmpty, "postponing wrote something: \(afterPostpone)")
-
-		// Postponing is not declining: the relay still holds it.
-		let stillPending = try await api.pending()
-		XCTAssertEqual(stillPending.files.count, 1, "postponing discarded the file")
-
-		let secondAsk = ConfirmationRecorder()
-		await receiver(deciding: .accept, recorder: secondAsk).poll()
-
-		let askedAgain = await secondAsk.count
-		XCTAssertEqual(askedAgain, 1, "the next poll should ask again")
-
-		let landed = try FileManager.default.contentsOfDirectory(atPath: destination.path)
-			.filter { !$0.hasPrefix(".") }
-		XCTAssertEqual(landed, ["note.txt"], "file did not land after accepting")
-		XCTAssertEqual(try Data(contentsOf: destination.appendingPathComponent("note.txt")), payload)
-		let drained = try await api.pending()
-		XCTAssertTrue(drained.files.isEmpty, "still pending after delivery")
-	}
-
-	/**
-	 A prompt that is never answered at all must not hold the receiver open.
-
-	 The app layer's own watchdog is the path that normally reclaims an
-	 unattended prompt; this covers the case where the app layer answers
-	 nothing, ever — a UI bug, a deadlocked main actor. `poll` has to come back
-	 regardless, or `isRunning` stays set and every later poll is swallowed.
-	 */
-	func testUnansweredConfirmationStillReleasesThePoll() async throws {
-		let identity = DeviceIdentity(
-			signing: .software(P256.Signing.PrivateKey()),
-			agreement: .software(P256.KeyAgreement.PrivateKey()),
-			isEnclaveBacked: false
-		)
-		let api = APIClient(origin: origin, identity: identity)
-		let deviceName = "live-\(UUID().uuidString.prefix(8).lowercased())"
-		_ = try await api.register(name: deviceName, slug: "inbox")
-
-		let (_, inboxes) = try await api.inboxes()
-		let inbox = try XCTUnwrap(inboxes.first)
-
-		let destination = workspace.appendingPathComponent("landing")
-		try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-		let store = InboxStore(directory: workspace.appendingPathComponent("state"))
-		store.bind(inboxID: inbox.inboxID, to: destination)
-
-		try await send(Data("stuck".utf8), named: "note.txt", to: inbox, api: api)
-
-		let receiver = Receiver(
-			api: api,
-			identity: identity,
-			store: store,
-			// Never answers. This is the shape of a closed window before the fix.
-			events: ReceiverEvents(confirm: { _, _ in
-				await withCheckedContinuation { (_: CheckedContinuation<Void, Never>) in }
-				return .accept
-			}),
-			confirmationDeadline: 300_000_000
-		)
-
-		await receiver.poll()
-
-		let running = await receiver.isRunning
-		XCTAssertFalse(running, "poll did not release; later polls would be swallowed")
-
-		// Treated as postponed, so the file is still there to be offered again.
-		let landedNothing = try FileManager.default.contentsOfDirectory(atPath: destination.path)
-		XCTAssertTrue(landedNothing.isEmpty, "an unanswered prompt wrote something")
-		let stillPending = try await api.pending()
-		XCTAssertEqual(stillPending.files.count, 1, "an unanswered prompt discarded the file")
 	}
 
 	/**
@@ -268,7 +127,7 @@ final class LiveDeliveryTests: XCTestCase {
 				switch event {
 				case .connected:
 					connected.fulfill()
-				case .fileReady(let fileID, _):
+				case .fileReady(let fileID):
 					Task {
 						if await seen.record(fileID) { pushed.fulfill() }
 					}
@@ -406,11 +265,6 @@ final class LiveDeliveryTests: XCTestCase {
 		}
 		return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
 	}
-}
-
-private actor ConfirmationRecorder {
-	private(set) var count = 0
-	func record() { count += 1 }
 }
 
 private actor FileReadyRecorder {

@@ -7,8 +7,8 @@ import SwiftUI
  A menu bar app runs as an `.accessory` application with no main window, and
  SwiftUI's `Window` scenes are opened by the framework at launch rather than on
  demand — which would put the onboarding screen in front of returning users
- every time. Managing these two windows directly keeps them tied to the events
- that should actually raise them: first run, and a sender waiting on a decision.
+ every time. Managing these windows directly keeps them tied to the events that
+ should actually raise them: first run, and the user asking.
  */
 @MainActor
 final class WindowPresenter {
@@ -17,8 +17,8 @@ final class WindowPresenter {
 	private var observers: [String: CloseObserver] = [:]
 
 	/// `onClose` fires only when the *user* closes the window, never when
-	/// `close(id:)` takes it down. A window that waits on an answer has to know
-	/// it was dismissed, or whoever is awaiting that answer waits forever.
+	/// `close(id:)` takes it down — so a window whose dismissal means something
+	/// (onboarding abandoned rather than finished) can tell the two apart.
 	func show<Content: View>(
 		id: String,
 		title: String,
@@ -55,7 +55,7 @@ final class WindowPresenter {
 
 	func close(id: String) {
 		// Detach first: closing programmatically is not a dismissal, and letting
-		// it reach `onClose` would resolve the very decision we just resolved.
+		// it reach `onClose` would report an abandonment that did not happen.
 		windows[id]?.delegate = nil
 		observers[id] = nil
 		windows[id]?.close()

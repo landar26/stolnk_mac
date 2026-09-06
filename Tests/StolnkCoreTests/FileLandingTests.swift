@@ -32,8 +32,6 @@ final class FileLandingTests: XCTestCase {
 			transferID: "t",
 			inboxID: "i",
 			inboxName: "Inbox",
-			senderSession: "s",
-			needsConfirmation: false,
 			encName: "",
 			nameIV: "",
 			size: size,

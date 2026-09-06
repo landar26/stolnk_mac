@@ -53,16 +53,6 @@ final class Notifier {
 		post(title: title, body: body, revealing: first.fileURL)
 	}
 
-	/// PRD 13.2 — the prompt itself is a window, and a window can be behind
-	/// something. This is the cue that survives that.
-	func awaitingConfirmation(name: String, inboxName: String, fileID: String) {
-		post(
-			title: "Waiting for your OK · \(inboxName)",
-			body: "\(name) — nothing is written until you accept.",
-			userInfo: ["confirm": fileID]
-		)
-	}
-
 	func inboxUnavailable(named name: String) {
 		post(
 			title: "Inbox paused · \(name)",
@@ -107,8 +97,8 @@ final class Notifier {
  Makes notifications clickable.
 
  Without a delegate the system drops a tap on the floor, and it also hides
- banners while the app is frontmost — which is exactly when a confirmation
- prompt has raised the app.
+ banners while the app is frontmost — which is exactly when the user is looking
+ at Stolnk and most likely to act on one.
  */
 private final class NotificationRouter: NSObject, UNUserNotificationCenterDelegate {
 	func userNotificationCenter(
@@ -123,9 +113,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
 		didReceive response: UNNotificationResponse
 	) async {
 		let info = response.notification.request.content.userInfo
-		if info["confirm"] is String {
-			await AppState.shared.showConfirmation()
-		} else if let path = info["path"] as? String {
+		if let path = info["path"] as? String {
 			NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
 		}
 	}
