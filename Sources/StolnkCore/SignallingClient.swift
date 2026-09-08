@@ -18,6 +18,17 @@ public final class SignallingClient: NSObject, @unchecked Sendable {
 		case connected
 		case disconnected
 		case fileReady(fileID: String)
+		/**
+		 PRD 8.2 — one WebRTC signalling message from a send page.
+
+		 The payload stays as the raw JSON it arrived as, and the session id is
+		 echoed back verbatim: this class is a transport and never learns what an
+		 SDP offer is. Bytes rather than a decoded dictionary is also what lets
+		 an `Event` cross an actor boundary at all — `[String: Any]` cannot be
+		 `Sendable`, and the alternative was to decode here, which would put
+		 WebRTC's wire format in the one file that should not know it.
+		 */
+		case signal(session: String, payload: Data)
 	}
 
 	private let lock = NSLock()
@@ -157,6 +168,23 @@ public final class SignallingClient: NSObject, @unchecked Sendable {
 		}
 	}
 
+	/**
+	 Answer one signalling message (PRD 8.2).
+
+	 Best effort by design: a dropped answer costs a LAN negotiation, and the
+	 sender falls back to the relay without ever being told. That is a slower
+	 transfer, not a failure, so it is not worth surfacing or retrying.
+	 */
+	public func sendSignal(session: String, payload: Data) {
+		guard let decoded = try? JSONSerialization.jsonObject(with: payload) else { return }
+		let message: [String: Any] = ["type": "signal", "session": session, "payload": decoded]
+		guard JSONSerialization.isValidJSONObject(message),
+			let data = try? JSONSerialization.data(withJSONObject: message),
+			let text = String(data: data, encoding: .utf8)
+		else { return }
+		send(text: text)
+	}
+
 	private func send(text: String) {
 		lock.lock()
 		let current = task
@@ -197,6 +225,12 @@ public final class SignallingClient: NSObject, @unchecked Sendable {
 
 		if type == "file.ready", let fileID = object["file_id"] as? String {
 			onEvent(.fileReady(fileID: fileID))
+		} else if type == "signal", let session = object["session"] as? String,
+			let payload = object["payload"],
+			JSONSerialization.isValidJSONObject(payload),
+			let raw = try? JSONSerialization.data(withJSONObject: payload)
+		{
+			onEvent(.signal(session: session, payload: raw))
 		}
 	}
 

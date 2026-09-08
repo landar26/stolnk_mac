@@ -131,7 +131,7 @@ final class LiveDeliveryTests: XCTestCase {
 					Task {
 						if await seen.record(fileID) { pushed.fulfill() }
 					}
-				case .disconnected:
+				case .disconnected, .signal:
 					break
 				}
 			}

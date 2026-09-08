@@ -74,6 +74,13 @@ if [ -z "${SKIP_TESTS:-}" ]; then
 	swift test
 fi
 
+# PRD 8.2 — the WebRTC framework is a remote binary artifact, so a cold machine
+# would otherwise discover a ~45 MB download in the middle of the release build.
+if ! find "$ROOT/.build/artifacts" -name 'WebRTC.xcframework' -print -quit 2>/dev/null | grep -q .; then
+	echo "==> resolving binary dependencies (downloads ~45 MB)"
+	swift package resolve
+fi
+
 echo "==> building universal (arm64 + x86_64)"
 swift build -c release --arch arm64 --arch x86_64
 
@@ -151,6 +158,11 @@ fi
 
 echo "==> verifying"
 lipo -archs "$APP/Contents/MacOS/StolnkApp"
+# The embedded framework is the larger half of the bundle and the half signed by
+# a separate codesign call, so it gets checked on its own terms: both slices
+# present, and a signature of ours rather than the adhoc one it ships with.
+lipo -archs "$APP/Contents/Frameworks/WebRTC.framework/Versions/A/WebRTC"
+codesign -dv "$APP/Contents/Frameworks/WebRTC.framework" 2>&1 | sed -n '1,4p'
 codesign --verify --deep --strict --verbose=2 "$APP"
 if [ -z "${SKIP_NOTARIZE:-}" ]; then
 	xcrun stapler validate "$APP"

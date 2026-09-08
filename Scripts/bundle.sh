@@ -101,8 +101,28 @@ if [ ! -d "$RESOURCE_BUNDLE" ]; then
 	exit 1
 fi
 
+# PRD 8.2 — the WebRTC framework the LAN receiver links against.
+#
+# Sourced from SwiftPM's artifact directory rather than from $BIN_DIR, because
+# the two builds do not agree on where that is: passing --arch twice makes
+# SwiftPM switch to the Xcode build system, with a different output path and no
+# documented guarantee that it copies binary targets next to the executable.
+# The artifact is the same file either way.
+XCFRAMEWORK="$(find "$ROOT/.build/artifacts" -type d -name 'WebRTC.xcframework' -print -quit)"
+if [ -z "$XCFRAMEWORK" ]; then
+	echo "error: WebRTC.xcframework not resolved — run 'swift package resolve' first" >&2
+	exit 1
+fi
+# stasel names it macos-x86_64_arm64; other builds order it the other way. The
+# Catalyst slice is ios-*-maccatalyst, so a macos-* glob is unambiguous.
+WEBRTC_FRAMEWORK="$(find "$XCFRAMEWORK" -maxdepth 1 -type d -name 'macos-*' -print -quit)/WebRTC.framework"
+if [ ! -d "$WEBRTC_FRAMEWORK" ]; then
+	echo "error: no macOS slice in $XCFRAMEWORK" >&2
+	exit 1
+fi
+
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 cp "$BINARY" "$APP/Contents/MacOS/StolnkApp"
 cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 # SwiftPM emits the target's declared resources as a bundle next to the
@@ -110,15 +130,31 @@ cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 # resolve inside the app exactly as it does for a bare `swift run` build.
 cp -R "$RESOURCE_BUNDLE" "$APP/Contents/Resources/"
 
+# ditto, not cp -R. The macOS slice is a *versioned* bundle: Versions/A holds
+# the real files, and Headers, Modules, Resources, WebRTC and Versions/Current
+# are symlinks into it. Anything that follows those symlinks instead of copying
+# them produces a directory codesign rejects as "bundle format unrecognized,
+# invalid, or unsuitable" — an error that names none of its dozen causes.
+ditto "$WEBRTC_FRAMEWORK" "$APP/Contents/Frameworks/WebRTC.framework"
+
 if [ "${UNIVERSAL:-}" = "1" ]; then
-	SLICES="$(lipo -archs "$APP/Contents/MacOS/StolnkApp")"
-	for want in arm64 x86_64; do
-		case " $SLICES " in
-			*" $want "*) ;;
-			*) echo "error: no $want slice — built $SLICES, expected arm64 x86_64" >&2; exit 1 ;;
-		esac
+	# The framework as well as our own binary. It ships fat already, so there is
+	# nothing to lipo — but if a future release of it ever ships arm64 only, an
+	# Intel Mac would get a dmg that cannot launch, and nothing else here would
+	# notice.
+	for TARGET in \
+		"$APP/Contents/MacOS/StolnkApp" \
+		"$APP/Contents/Frameworks/WebRTC.framework/Versions/A/WebRTC"
+	do
+		SLICES="$(lipo -archs "$TARGET")"
+		for want in arm64 x86_64; do
+			case " $SLICES " in
+				*" $want "*) ;;
+				*) echo "error: $(basename "$TARGET") has no $want slice — built $SLICES" >&2; exit 1 ;;
+			esac
+		done
+		echo "architectures: $(basename "$TARGET") $SLICES"
 	done
-	echo "architectures: $SLICES"
 fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -147,6 +183,14 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<!-- Menu bar only: no Dock icon, no window at rest. -->
 	<key>LSUIElement</key>
 	<true/>
+	<!-- PRD 8.2. macOS 15 gates the first packet to a local-subnet address
+	     behind a consent prompt, sandboxed or not, and host-candidate ICE is
+	     exactly that packet. Denial is invisible to us — the packets are
+	     dropped with no error to catch and ICE simply times out — so this
+	     string is the only chance to explain what is being asked for. The
+	     relay keeps working either way. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Stolnk uses your local network to receive files directly from a device on the same Wi-Fi, instead of sending them the long way round through the internet.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
@@ -168,6 +212,26 @@ cat > "$ROOT/build/Stolnk.entitlements" <<'ENTITLEMENTS'
 </plist>
 ENTITLEMENTS
 
+# The framework is signed first, and separately.
+#
+# First, because an app's signature seals the cdhash of everything nested inside
+# it: sign the framework afterwards and the app's own signature is immediately
+# invalid. Separately, because the vendor ships it adhoc/linker-signed with no
+# sealed resources, and notarisation refuses anything not signed with the
+# Developer ID certificate, timestamped, and under the hardened runtime — the
+# nested framework included.
+#
+# No --entitlements and no --identifier here. Entitlements belong to the app;
+# handing `app-sandbox=false` to org.webrtc.WebRTC would be meaningless at best.
+# The framework carries its own bundle identifier in Versions/A/Resources.
+#
+# Versions/A rather than the .framework: both work on a well-formed bundle, and
+# only this one gives a usable error on a malformed one.
+sign_framework() {
+	codesign --force --sign "$IDENTITY" "$@" \
+		"$APP/Contents/Frameworks/WebRTC.framework/Versions/A"
+}
+
 # Three explicit cases and deliberately no `|| codesign ...` fallback. The
 # fallback this replaces re-signed with neither the hardened runtime nor the
 # entitlements and still printed "built", which is how an unnotarisable — or
@@ -175,6 +239,7 @@ ENTITLEMENTS
 if [ "$IDENTITY" = "-" ]; then
 	# Ad-hoc carries no certificate, so it can neither take a secure timestamp
 	# nor meaningfully assert a hardened runtime. Local development only.
+	sign_framework
 	codesign --force --sign - \
 		--entitlements "$ROOT/build/Stolnk.entitlements" \
 		"$APP"
@@ -183,6 +248,7 @@ elif [ "${RELEASE:-}" = "1" ]; then
 	# signature stops validating the day the certificate expires — turning every
 	# copy already installed into a "damaged" app — and notarisation refuses the
 	# upload outright.
+	sign_framework --options runtime --timestamp
 	codesign --force --sign "$IDENTITY" \
 		--identifier com.nbtxy.stolnk \
 		--entitlements "$ROOT/build/Stolnk.entitlements" \
@@ -192,6 +258,7 @@ elif [ "${RELEASE:-}" = "1" ]; then
 else
 	# Same shape as a release, minus the round trip to Apple's timestamp server
 	# on every `make app`.
+	sign_framework --options runtime --timestamp=none
 	codesign --force --sign "$IDENTITY" \
 		--identifier com.nbtxy.stolnk \
 		--entitlements "$ROOT/build/Stolnk.entitlements" \
@@ -200,7 +267,11 @@ else
 		"$APP"
 fi
 
-codesign --verify --strict --verbose=2 "$APP"
+# --deep on *verification* (never on signing, where it would push the app's
+# entitlements down into the framework). Without it the nested framework's
+# signature is not checked at all, and a broken one surfaces only at the
+# notarisation round trip.
+codesign --verify --deep --strict --verbose=2 "$APP"
 
 echo "built $APP"
 codesign -dv "$APP" 2>&1 | sed -n '1,4p'

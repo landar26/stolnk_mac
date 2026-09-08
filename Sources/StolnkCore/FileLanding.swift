@@ -74,8 +74,21 @@ public enum FileLanding {
  partial one — memory stays flat whether the file is 1 KB or 20 GB, which is a
  stated acceptance requirement.
  */
-public final class DecryptingSink {
+/**
+ Streaming decryption into a `.part` file.
+
+ `@unchecked Sendable` with a real lock behind it, rather than a promise. Both
+ transports hand this object across threads: the relay path drives it from
+ URLSession's delegate queue, and the LAN path (PRD 8.2) fills it on libwebrtc's
+ signalling thread and then finishes it from a Task. Neither ever calls in
+ concurrently — the ciphertext is one ordered stream — but "never concurrently"
+ is an argument about callers, and this holds the file handle, the running
+ digest and the chunk cursor. The lock costs nothing next to AES-GCM and makes
+ the guarantee structural.
+ */
+public final class DecryptingSink: @unchecked Sendable {
 	public let partURL: URL
+	private let lock = NSLock()
 	private let contentKey: SymmetricKey
 	private let fileIDBytes: Data
 	private let noncePrefix: Data
@@ -86,8 +99,10 @@ public final class DecryptingSink {
 	private var buffer = Data()
 	private var nextChunk = 0
 	private var hasher = SHA256()
-	public private(set) var plaintextWritten = 0
-	public private(set) var ciphertextConsumed = 0
+	private var _plaintextWritten = 0
+	private var _ciphertextConsumed = 0
+	public var plaintextWritten: Int { lock.withLock { _plaintextWritten } }
+	public var ciphertextConsumed: Int { lock.withLock { _ciphertextConsumed } }
 
 	public init(
 		file: PendingFile,
@@ -124,8 +139,10 @@ public final class DecryptingSink {
 	}
 
 	public func consume(_ data: Data) throws {
+		lock.lock()
+		defer { lock.unlock() }
 		buffer.append(data)
-		ciphertextConsumed += data.count
+		_ciphertextConsumed += data.count
 
 		while nextChunk < totalChunks {
 			let needed = cipherLength(ofChunk: nextChunk)
@@ -145,7 +162,7 @@ public final class DecryptingSink {
 			if !plain.isEmpty {
 				handle.write(plain)
 				hasher.update(data: plain)
-				plaintextWritten += plain.count
+				_plaintextWritten += plain.count
 			}
 			nextChunk += 1
 		}
@@ -159,14 +176,16 @@ public final class DecryptingSink {
 	/// authentic; this catches assembly mistakes they cannot see, such as a part
 	/// written twice or a stream that ended early.
 	public func finish(expecting digest: String) throws {
+		lock.lock()
+		defer { lock.unlock() }
 		try handle.close()
 		guard nextChunk == totalChunks else {
 			throw FileLanding.Failure.incompleteStream(
-				received: plaintextWritten, expected: plaintextSize)
+				received: _plaintextWritten, expected: plaintextSize)
 		}
-		guard plaintextWritten == plaintextSize else {
+		guard _plaintextWritten == plaintextSize else {
 			throw FileLanding.Failure.incompleteStream(
-				received: plaintextWritten, expected: plaintextSize)
+				received: _plaintextWritten, expected: plaintextSize)
 		}
 		let computed = Data(hasher.finalize()).hexString
 		guard computed == digest else { throw CryptoBox.Failure.digestMismatch }
@@ -177,15 +196,21 @@ public final class DecryptingSink {
 	/// open file handle across retries, a dropped connection costs at most one
 	/// chunk rather than the whole file.
 	public var resumeCiphertextOffset: Int {
-		(0..<nextChunk).reduce(0) { $0 + cipherLength(ofChunk: $1) }
+		lock.lock()
+		defer { lock.unlock() }
+		return (0..<nextChunk).reduce(0) { $0 + cipherLength(ofChunk: $1) }
 	}
 
 	/// Discards a half-received chunk before resuming from `resumeCiphertextOffset`.
 	public func discardPartialBuffer() {
+		lock.lock()
+		defer { lock.unlock() }
 		buffer.removeAll(keepingCapacity: false)
 	}
 
 	public func abandon() {
+		lock.lock()
+		defer { lock.unlock() }
 		try? handle.close()
 		try? FileManager.default.removeItem(at: partURL)
 	}

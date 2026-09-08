@@ -80,7 +80,24 @@ public actor Receiver {
 		if !landed.isEmpty { events.landed(landed) }
 	}
 
-	private func receive(_ file: PendingFile) async throws -> LandedFile? {
+	/**
+	 Everything that has to happen before the first ciphertext byte can be
+	 accepted: unwrap the key, work out the name, find the folder, open the sink.
+
+	 Shared with the LAN path (PRD 8.2), which differs from the relay only in
+	 where the bytes come from. Keeping one copy is not tidiness — this is where
+	 the filename is sanitised and where an unbound inbox pauses instead of
+	 landing somewhere nobody chose, and a second copy is a second chance to get
+	 one of those wrong.
+	 */
+	public struct Landing: Sendable {
+		public let sink: DecryptingSink
+		public let safeName: String
+		public let folder: URL
+		public let partURL: URL
+	}
+
+	public func prepare(_ file: PendingFile) async throws -> Landing? {
 		// Unwrap first: a file this Mac cannot decrypt should never have reached
 		// the point of touching the filesystem.
 		let kek = try CryptoBox.deriveKEK(
@@ -117,6 +134,13 @@ public actor Receiver {
 		try? FileManager.default.removeItem(at: partURL)
 
 		let sink = try DecryptingSink(file: file, contentKey: contentKey, partURL: partURL)
+		return Landing(sink: sink, safeName: safeName, folder: folder, partURL: partURL)
+	}
+
+	private func receive(_ file: PendingFile) async throws -> LandedFile? {
+		guard let landing = try await prepare(file) else { return nil }
+		let sink = landing.sink
+        _ = landing.partURL
 		let downloader = RelayDownloader()
 		defer { downloader.invalidate() }
 
@@ -145,29 +169,48 @@ public actor Receiver {
 		} catch {
 			// PRD 9.3 — leave no half file behind, ever.
 			sink.abandon()
-			events.failed(file, safeName, error)
+			events.failed(file, landing.safeName, error)
 			return nil
 		}
 
-		// Quarantine before the file becomes visible under its real name, so it is
-		// never briefly present without the Gatekeeper marker.
-		FileLanding.applyQuarantine(to: partURL)
+		return try await land(file, landing)
+	}
 
-		let finalName = FileNameSanitizer.uniqueName(for: safeName, in: folder)
-		let destination = folder.appendingPathComponent(finalName)
+	/**
+	 The last few inches: quarantine, a name that collides with nothing, an
+	 atomic rename, and only then the ACK.
+
+	 The order is the whole content of this method. Quarantine goes on the `.part`
+	 file so the file is never momentarily visible under its real name without
+	 the Gatekeeper marker; the ACK goes last because the server deletes its copy
+	 the instant it returns, so anything that can still fail must have failed
+	 already.
+
+	 Both transports end here, and `digest` is why it takes an argument rather
+	 than reading `file.plainSHA256`: on the LAN path the sender never calls
+	 `complete`, so the row carries no digest and the one the Mac verified is the
+	 one the server has to be told.
+	 */
+	public func land(
+		_ file: PendingFile,
+		_ landing: Landing,
+		digest: String? = nil
+	) async throws -> LandedFile? {
+		FileLanding.applyQuarantine(to: landing.partURL)
+
+		let finalName = FileNameSanitizer.uniqueName(for: landing.safeName, in: landing.folder)
+		let destination = landing.folder.appendingPathComponent(finalName)
 		do {
-			try FileManager.default.moveItem(at: partURL, to: destination)
+			try FileManager.default.moveItem(at: landing.partURL, to: destination)
 			try? FileManager.default.setAttributes(
 				[.posixPermissions: 0o644], ofItemAtPath: destination.path)
 		} catch {
-			sink.abandon()
-			events.failed(file, safeName, error)
+			landing.sink.abandon()
+			events.failed(file, landing.safeName, error)
 			return nil
 		}
 
-		// Only now is it safe to ACK: the server deletes the relay copy the moment
-		// this returns, so the file must already be on disk.
-		try await api.acknowledge(fileID: file.fileID)
+		try await api.acknowledge(fileID: file.fileID, plainSHA256: digest)
 
 		let landed = LandedFile(
 			id: file.fileID,

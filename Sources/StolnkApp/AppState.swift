@@ -97,6 +97,20 @@ final class AppState: ObservableObject {
 	private var api: APIClient?
 	private var receiver: Receiver?
 	private var signalling: SignallingClient?
+	/*
+	 PRD 8.2 — answers DataChannel offers from send pages on the same network.
+
+	 `nonisolated(unsafe)` because signalling frames arrive on the socket's own
+	 queue and must not wait on the main actor to be dispatched — WebRTC
+	 negotiation is the thing racing a two-second deadline. The ordering that
+	 makes it safe is explicit rather than incidental: it is assigned in
+	 `connectSignalling` *before* `client.start()`, so no frame can be delivered
+	 until the write has happened, and `LanReceiver` guards its own state.
+	 */
+	private nonisolated(unsafe) var lanReceiver: LanReceiver?
+	/// Kept so the LAN path reports a landed file through the identical closure
+	/// the relay path uses, rather than a second one that could drift from it.
+	private var receiverEvents: ReceiverEvents?
 	private let notifier = Notifier()
 	private let presenter = WindowPresenter()
 	private var pollTimer: Timer?
@@ -394,6 +408,7 @@ final class AppState: ObservableObject {
 				}
 			}
 		)
+		receiverEvents = events
 		receiver = Receiver(api: api, identity: keys, store: store, events: events)
 	}
 
@@ -401,15 +416,25 @@ final class AppState: ObservableObject {
 
 	private func connectSignalling() {
 		signalling?.stop()
+		lanReceiver?.stopAll()
 		let client = SignallingClient(
 			urlProvider: { [weak self] in
 				guard let api = await self?.api else { return nil }
 				return await api.signallingURL()
 			},
 			onEvent: { [weak self] event in
+				// Handled off the main actor on purpose: this is the frame the LAN
+				// negotiation is waiting on, and its payload is a JSON dictionary
+				// that could not cross an actor boundary anyway.
+				if case .signal(let session, let payload) = event {
+					self?.lanReceiver?.handle(session: session, payload: payload)
+					return
+				}
 				Task { @MainActor [weak self] in
 					guard let self else { return }
 					switch event {
+					case .signal:
+						break  // Handled above, before the hop.
 					case .connected:
 						self.socketConnected = true
 						if case .receiving = self.status {} else { self.status = .ready }
@@ -423,6 +448,29 @@ final class AppState: ObservableObject {
 			}
 		)
 		signalling = client
+
+		/*
+		 PRD 8.2 — the LAN answerer, wired to the same socket.
+		 
+		 It shares the Receiver, so a file that arrives over a DataChannel is
+		 sanitised, quarantined, named and acknowledged by exactly the code that
+		 handles a relay pull. The only difference is where the bytes came from.
+		 */
+		if let receiver, let api, let events = receiverEvents {
+			lanReceiver = LanReceiver(
+				receiver: receiver,
+				api: api,
+				answer: { [weak client] session, payload in
+					client?.sendSignal(session: session, payload: payload)
+				},
+				// The same closure the relay path reports through, deliberately:
+				// a file that arrived is a file that arrived, and the notification,
+				// the Finder reveal and the recent list must not be able to
+				// disagree about which transport it came in on.
+				onLanded: { landed in events.landed(landed) }
+			)
+		}
+
 		client.start()
 		observeWake()
 	}

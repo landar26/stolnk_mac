@@ -173,9 +173,23 @@ public actor APIClient {
 
 	/// Deleting the relay object is the server's synchronous response to this
 	/// call (PRD 8.5), so it must only be sent once the file is safely landed.
-	public func acknowledge(fileID: String) async throws {
+	///
+	/// `plainSHA256` is sent only on the LAN path (PRD 8.2). There the sender
+	/// never calls `complete`, so the server's row has no digest — and this Mac,
+	/// having just checked it against the bytes it wrote, is the only party that
+	/// can supply one worth having.
+	public func acknowledge(fileID: String, plainSHA256: String? = nil) async throws {
 		struct Response: Codable { let delivered: Bool }
-		let _: Response = try await send("POST", "/api/v1/files/\(fileID)/ack")
+		let body = plainSHA256.map { ["plain_sha256": $0] }
+		let _: Response = try await send("POST", "/api/v1/files/\(fileID)/ack", body: body)
+	}
+
+	/// PRD 8.2 — the envelope for a file arriving over a DataChannel, which never
+	/// appears in `/pending` because it never reaches the relay.
+	public func lanFileMeta(fileID: String) async throws -> PendingFile {
+		struct Response: Decodable { let file: PendingFile }
+		let response: Response = try await send("GET", "/api/v1/files/\(fileID)/meta")
+		return response.file
 	}
 
 	public func contentRequest(fileID: String, from offset: Int) async throws -> URLRequest {
