@@ -24,6 +24,56 @@ public struct InboxSummary: Codable, Identifiable, Sendable, Hashable {
 	}
 }
 
+public struct ShareSummary: Codable, Identifiable, Sendable, Hashable {
+	public let shareID: String
+	public let code: String
+	public let url: String
+	public let filename: String
+	public let size: Int
+	public let sha256: String?
+	public let maxDownloads: Int?
+	public let downloads: Int
+	public let downloadsLeft: Int?
+	public let state: String
+	public let paused: Bool
+	public let hasPassword: Bool
+	public let createdAt: Double
+	public let expiresAt: Double
+	public let lastDownloadAt: Double?
+
+	public var id: String { shareID }
+	public var isLive: Bool { state == "ready" && !paused && expiresAt > Date().timeIntervalSince1970 * 1000 }
+
+	enum CodingKeys: String, CodingKey {
+		case shareID = "share_id", code, url, filename, size, sha256
+		case maxDownloads = "max_downloads"
+		case downloads
+		case downloadsLeft = "downloads_left"
+		case state, paused
+		case hasPassword = "has_password"
+		case createdAt = "created_at"
+		case expiresAt = "expires_at"
+		case lastDownloadAt = "last_download_at"
+	}
+}
+
+public struct ShareHandle: Codable, Sendable, Hashable {
+	public let shareID: String
+	public let code: String
+	public let url: String
+	public let token: String
+	public let partSize: Int
+	public let partCount: Int
+	public let expiresAt: Double
+
+	enum CodingKeys: String, CodingKey {
+		case shareID = "share_id", code, url, token
+		case partSize = "part_size"
+		case partCount = "part_count"
+		case expiresAt = "expires_at"
+	}
+}
+
 public struct RegistrationResult: Codable, Sendable {
 	public let deviceID: String
 	public let name: String

@@ -50,6 +50,21 @@ struct MenuBarView: View {
 			.padding(.horizontal, 12)
 			.padding(.vertical, 8)
 
+			Button {
+				state.showNewShare()
+			} label: {
+				Label("Share a File…", systemImage: "square.and.arrow.up")
+					.frame(maxWidth: .infinity, alignment: .leading)
+			}
+			.buttonStyle(.plain)
+			.padding(.horizontal, 12)
+			.padding(.bottom, 8)
+
+			if !state.shares.isEmpty || !state.shareUploads.isEmpty {
+				Divider()
+				sharing
+			}
+
 			if !state.recent.isEmpty {
 				Divider()
 				recent
@@ -59,7 +74,7 @@ struct MenuBarView: View {
 			footer
 		}
 		.sheet(item: $qrTarget) { inbox in
-			QRSheet(inbox: inbox) { qrTarget = nil }
+			QRSheet(title: inbox.displayName, url: inbox.url) { qrTarget = nil }
 		}
 	}
 
@@ -138,6 +153,34 @@ struct MenuBarView: View {
 			}
 			.padding(.bottom, 8)
 		}
+	}
+
+	private var sharing: some View {
+		VStack(alignment: .leading, spacing: 6) {
+			Text("Sharing").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+			ForEach(state.shareUploads) { upload in
+				VStack(alignment: .leading, spacing: 3) {
+					Text(upload.filename).lineLimit(1)
+					ProgressView(value: upload.progress)
+				}
+			}
+			ForEach(state.shares.filter(\.isLive).prefix(4)) { share in
+				HStack {
+					VStack(alignment: .leading, spacing: 2) {
+						Text(share.filename).lineLimit(1)
+						Text(Date(timeIntervalSince1970: share.expiresAt / 1000), style: .relative)
+							.font(.caption2).foregroundStyle(.secondary)
+					}
+					Spacer()
+					if let left = share.downloadsLeft { Text("\(left) left").font(.caption2) }
+					Button("Copy") { state.copyShareURL(share.url) }
+					Button("Revoke") { Task { await state.revokeShare(share) } }
+				}
+				.font(.caption)
+			}
+		}
+		.padding(.horizontal, 12)
+		.padding(.vertical, 8)
 	}
 
 	private var footer: some View {
@@ -271,6 +314,20 @@ enum FolderPicker {
 		panel.canChooseFiles = false
 		panel.canChooseDirectories = true
 		panel.canCreateDirectories = true
+		panel.allowsMultipleSelection = false
+		panel.prompt = "Choose"
+		panel.message = prompt
+		NSApp.activate(ignoringOtherApps: true)
+		return panel.runModal() == .OK ? panel.url : nil
+	}
+}
+
+enum FilePicker {
+	@MainActor
+	static func choose(prompt: String) -> URL? {
+		let panel = NSOpenPanel()
+		panel.canChooseFiles = true
+		panel.canChooseDirectories = false
 		panel.allowsMultipleSelection = false
 		panel.prompt = "Choose"
 		panel.message = prompt

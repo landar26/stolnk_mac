@@ -55,6 +55,7 @@ public struct StoredState: Codable, Sendable {
 	public var token: String?
 	public var folders: [String: FolderBinding] = [:]
 	public var inboxes: [InboxSummary] = []
+	public var shares: [ShareSummary] = []
 	public var recent: [LandedFile] = []
 	public var hasCompletedOnboarding = false
 	/// PRD 14 — Finder opens once, on the first successful receive, as proof it
@@ -63,6 +64,27 @@ public struct StoredState: Codable, Sendable {
 	public var openFinderEveryTime = false
 
 	public init() {}
+
+	enum CodingKeys: String, CodingKey {
+		case scheme, baseHost, deviceID, name, token, folders, inboxes, shares, recent
+		case hasCompletedOnboarding, hasOpenedFinderOnce, openFinderEveryTime
+	}
+
+	public init(from decoder: Decoder) throws {
+		let values = try decoder.container(keyedBy: CodingKeys.self)
+		scheme = try values.decodeIfPresent(String.self, forKey: .scheme) ?? Self.defaultScheme
+		baseHost = try values.decodeIfPresent(String.self, forKey: .baseHost) ?? Self.defaultBaseHost
+		deviceID = try values.decodeIfPresent(String.self, forKey: .deviceID)
+		name = try values.decodeIfPresent(String.self, forKey: .name)
+		token = try values.decodeIfPresent(String.self, forKey: .token)
+		folders = try values.decodeIfPresent([String: FolderBinding].self, forKey: .folders) ?? [:]
+		inboxes = try values.decodeIfPresent([InboxSummary].self, forKey: .inboxes) ?? []
+		shares = try values.decodeIfPresent([ShareSummary].self, forKey: .shares) ?? []
+		recent = try values.decodeIfPresent([LandedFile].self, forKey: .recent) ?? []
+		hasCompletedOnboarding = try values.decodeIfPresent(Bool.self, forKey: .hasCompletedOnboarding) ?? false
+		hasOpenedFinderOnce = try values.decodeIfPresent(Bool.self, forKey: .hasOpenedFinderOnce) ?? false
+		openFinderEveryTime = try values.decodeIfPresent(Bool.self, forKey: .openFinderEveryTime) ?? false
+	}
 }
 
 /// Persists to Application Support. Deliberately not the keychain: none of this

@@ -47,6 +47,7 @@ enum ConnectionStatus: Equatable {
 /// on is a decision the caller makes.
 enum SettingsTab: Hashable {
 	case links
+	case shares
 	case plan
 	case general
 }
@@ -66,6 +67,8 @@ final class AppState: ObservableObject {
 
 	@Published private(set) var status: ConnectionStatus = .connecting
 	@Published private(set) var inboxes: [InboxSummary] = []
+	@Published private(set) var shares: [ShareSummary] = []
+	@Published private(set) var shareUploads: [ShareUpload] = []
 	@Published private(set) var recent: [LandedFile] = []
 	@Published private(set) var isEnclaveBacked = false
 	@Published private(set) var name: String?
@@ -81,6 +84,7 @@ final class AppState: ObservableObject {
 	/// because `WindowPresenter` reuses the window: opening Settings a second time
 	/// does not rebuild the view, so a constructor argument would be ignored.
 	@Published var selectedInboxID: String?
+	@Published var selectedShareID: String?
 
 	/// PRD 16 — the tier and this month's usage, as the server reports them.
 	/// Optional because "not asked yet" and "Free" are different things, and
@@ -116,6 +120,12 @@ final class AppState: ObservableObject {
 	private var pollTimer: Timer?
 	private var socketConnected = false
 
+	struct ShareUpload: Identifiable, Sendable {
+		let id: UUID
+		let filename: String
+		var progress: Double
+	}
+
 	/// The apex. Every API call goes here; inbox links live one label below it.
 	var origin: URL {
 		let state = store.snapshot
@@ -135,6 +145,7 @@ final class AppState: ObservableObject {
 
 	func start() async {
 		recent = store.snapshot.recent
+		shares = store.snapshot.shares
 
 		// Deliberately not awaited. Asking for notification permission involves a
 		// system prompt, and on an unnotarised build that call can stall; letting
@@ -190,6 +201,7 @@ final class AppState: ObservableObject {
 			buildReceiver(api: client, keys: keys)
 			if saved.deviceID != nil {
 				await refreshInboxes()
+				await refreshShares()
 				await refreshPlan()
 				connectSignalling()
 				await poll()
@@ -355,6 +367,15 @@ final class AppState: ObservableObject {
 		}
 	}
 
+	func showNewShare() {
+		guard let file = FilePicker.choose(prompt: "Choose one file to share") else { return }
+		presenter.show(id: "new-share", title: "Share a File") {
+			NewShareView(file: file).environmentObject(self)
+		}
+	}
+
+	func closeNewShare() { presenter.close(id: "new-share") }
+
 	func closeNewInbox() {
 		presenter.close(id: "new-inbox")
 	}
@@ -511,6 +532,7 @@ final class AppState: ObservableObject {
 		// Files that just landed spent someone's allowance, so the plan rides
 		// along with the poll rather than getting a timer of its own.
 		await refreshPlan()
+		await refreshShares()
 	}
 
 	private func revealIfAppropriate(_ files: [LandedFile]) {
@@ -605,6 +627,91 @@ final class AppState: ObservableObject {
 		} catch {
 			handle(error)
 		}
+	}
+
+	func refreshShares() async {
+		guard let api else { return }
+		do {
+			let response = try await api.shares()
+			shares = response.shares
+			store.mutate { $0.shares = response.shares }
+		} catch {
+			handle(error)
+		}
+	}
+
+	func createShare(
+		file: URL, ttlHours: Double, maxDownloads: Int?, password: String?, code: String?
+	) async -> Bool {
+		guard let api else { return false }
+		let uploadID = UUID()
+		do {
+			let values = try file.resourceValues(forKeys: [.fileSizeKey, .nameKey])
+			let filename = values.name ?? file.lastPathComponent
+			let size = values.fileSize ?? 0
+			var verifier: String?
+			var salt: String?
+			if let password, !password.isEmpty {
+				let parameters = try await api.shareSalt()
+				salt = parameters.salt
+				verifier = try await SharePassword.derive(password, salt: parameters.salt, iterations: parameters.iterations)
+			}
+			let handle = try await api.createShare(
+				filename: filename, size: size, ttlHours: ttlHours,
+				maxDownloads: maxDownloads, password: verifier, passwordSalt: salt,
+				code: code.map(ShareCodeRules.normalise))
+			shareUploads.append(ShareUpload(id: uploadID, filename: filename, progress: 0))
+			let scoped = file.startAccessingSecurityScopedResource()
+			defer { if scoped { file.stopAccessingSecurityScopedResource() } }
+			try await api.uploadShare(handle, from: file) { [weak self] progress in
+				Task { @MainActor in
+					guard let self, let index = self.shareUploads.firstIndex(where: { $0.id == uploadID }) else { return }
+					self.shareUploads[index].progress = progress
+				}
+			}
+			shareUploads.removeAll { $0.id == uploadID }
+			await refreshShares()
+			copyShareURL(handle.url)
+			closeNewShare()
+			return true
+		} catch let error as APIError where error.isUpgradeRequired {
+			shareUploads.removeAll { $0.id == uploadID }
+			upgradePrompt = UpgradePrompt(title: "Share with Pro", message: error.message)
+		} catch {
+			shareUploads.removeAll { $0.id == uploadID }
+			handle(error)
+		}
+		return false
+	}
+
+	/// Repath a live link. `code_taken` is not a paywall, so it lands in
+	/// `lastError` like any other refusal — only 402 becomes an upgrade prompt.
+	func setShareCode(_ share: ShareSummary, code: String) async {
+		guard let api else { return }
+		do {
+			_ = try await api.updateShareCode(share.shareID, code: ShareCodeRules.normalise(code))
+			await refreshShares()
+		} catch { handle(error) }
+	}
+
+	/// `nil` when the question could not be asked — never rendered as "taken".
+	func isShareCodeAvailable(_ candidate: String, forShare shareID: String? = nil) async -> Bool? {
+		guard let api else { return nil }
+		return try? await api.shareCodeAvailable(
+			ShareCodeRules.normalise(candidate), forShare: shareID)
+	}
+
+	func revokeShare(_ share: ShareSummary) async {
+		guard let api else { return }
+		do {
+			try await api.revokeShare(share.shareID)
+			await refreshShares()
+		} catch { handle(error) }
+	}
+
+	func copyShareURL(_ url: String) {
+		NSPasteboard.general.clearContents()
+		NSPasteboard.general.setString(url, forType: .string)
 	}
 
 	func folder(for inbox: InboxSummary) -> URL? {
@@ -735,6 +842,7 @@ final class AppState: ObservableObject {
 				$0.inboxes = list
 				$0.name = chosen
 			}
+			await refreshShares()
 			return true
 		} catch {
 			handle(error)

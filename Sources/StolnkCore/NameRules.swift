@@ -79,6 +79,38 @@ public enum PathRules {
 	}
 }
 
+/**
+ A share link's path — the part after `~`, when the owner chooses it instead of
+ letting one be minted. Mirrors `SHARE_CODE_RE` in `worker/limits.ts`.
+
+ One segment, unlike `PathRules`: `/~<code>/<filename>` already spends the
+ second segment on the filename. Saying so out loud matters, because the inbox
+ field two screens away does accept `2026/invoices`.
+ */
+public enum ShareCodeRules {
+	public static let minLength = 3
+	public static let maxLength = 32
+
+	public static func normalise(_ raw: String) -> String {
+		raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+	}
+
+	/// A blank path is not a problem here — it means "mint me a random one".
+	public static func problem(with raw: String) -> String? {
+		let code = normalise(raw)
+		if code.isEmpty { return nil }
+		if code.contains("/") { return "A link path is a single segment — no slashes." }
+		if code.count < minLength { return "A link path is at least \(minLength) characters." }
+		if code.count > maxLength { return "A link path is at most \(maxLength) characters." }
+		if !code.allSatisfy(isAllowed) { return "Use lowercase letters, numbers and hyphens." }
+		return nil
+	}
+
+	private static func isAllowed(_ character: Character) -> Bool {
+		character.isASCII && (character.isLowercase || character.isNumber || character == "-")
+	}
+}
+
 /// The name senders see on the send page — "Send files to Client A". Unrelated
 /// to the address; mirrors `MAX_DISPLAY_NAME` in `worker/limits.ts`.
 public enum DisplayNameRules {

@@ -164,7 +164,7 @@ private struct InboxLinkDetail: View {
 			if !savingName { displayName = value }
 		}
 		.sheet(item: $qrTarget) { inbox in
-			QRSheet(inbox: inbox) { qrTarget = nil }
+			QRSheet(title: inbox.displayName, url: inbox.url) { qrTarget = nil }
 		}
 		.alert("Reset this link?", isPresented: $confirmingReset) {
 			Button("Cancel", role: .cancel) {}

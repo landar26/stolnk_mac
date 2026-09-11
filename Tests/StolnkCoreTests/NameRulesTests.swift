@@ -78,4 +78,33 @@ final class NameRulesTests: XCTestCase {
 		XCTAssertNotNil(PathRules.problem(with: "client a"))
 		XCTAssertNotNil(PathRules.problem(with: String(repeating: "a", count: 33)))
 	}
+
+	/// Blank is the one difference from `PathRules`: it means "mint me a random
+	/// path", which is what every share got before paths became choosable.
+	func testBlankShareCodeIsNotAProblem() {
+		XCTAssertNil(ShareCodeRules.problem(with: ""))
+		XCTAssertNil(ShareCodeRules.problem(with: "   "))
+	}
+
+	func testShareCodeAcceptsWhatTheServerAccepts() {
+		for code in ["abc", "invoice-2026", "r2d2", String(repeating: "a", count: 32)] {
+			XCTAssertNil(ShareCodeRules.problem(with: code), code)
+		}
+		XCTAssertEqual(ShareCodeRules.normalise("  Invoice-2026 "), "invoice-2026")
+		XCTAssertNil(ShareCodeRules.problem(with: "  Invoice-2026 "))
+	}
+
+	func testShareCodeRejectsLengthAndCharset() {
+		XCTAssertNotNil(ShareCodeRules.problem(with: "ab"))
+		XCTAssertNotNil(ShareCodeRules.problem(with: String(repeating: "a", count: 33)))
+		XCTAssertNotNil(ShareCodeRules.problem(with: "invoice_2026"))
+		XCTAssertNotNil(ShareCodeRules.problem(with: "invoice 2026"))
+	}
+
+	/// The inbox field two screens away takes `2026/invoices`; this one cannot,
+	/// because the second segment of a share URL is already the filename.
+	func testShareCodeIsASingleSegment() {
+		XCTAssertNotNil(ShareCodeRules.problem(with: "2026/invoices"))
+		XCTAssertNotNil(ShareCodeRules.problem(with: "/invoice"))
+	}
 }

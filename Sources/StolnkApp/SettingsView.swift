@@ -10,6 +10,10 @@ struct SettingsView: View {
 				.tabItem { Label("Links", systemImage: "link") }
 				.tag(SettingsTab.links)
 
+			SharesView()
+				.tabItem { Label("Shares", systemImage: "square.and.arrow.up") }
+				.tag(SettingsTab.shares)
+
 			PlanSettings()
 				.tabItem { Label("Plan", systemImage: "creditcard") }
 				.tag(SettingsTab.plan)
@@ -232,7 +236,7 @@ private struct GeneralSettings: View {
 						.disabled(renaming || nameStatus.blocksSubmission)
 				}
 
-				Text("Every link on this Mac moves to the new name at once, and the old address stops working immediately — anyone holding a link to it is cut off, and the name goes straight back into the pool for someone else to take.")
+				Text("Every inbox and active share link on this Mac moves to the new name at once. The old addresses stop working immediately, cutting off anyone holding them, and the name goes straight back into the pool for someone else to take.")
 					.font(.caption)
 					.foregroundStyle(.secondary)
 					.fixedSize(horizontal: false, vertical: true)
