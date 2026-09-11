@@ -16,7 +16,7 @@ struct SharesView: View {
 						HStack(spacing: 4) {
 							if share.hasPassword { badge("Password", .accentColor) }
 							if share.maxDownloads == 1 { badge("Burn after read", .orange) }
-							if !share.isLive { badge(share.paused ? "Paused" : "Expired", .secondary) }
+							if let ended = endedBadge(share) { badge(ended.0, ended.1) }
 						}
 					}
 					.tag(share.shareID)
@@ -44,6 +44,21 @@ struct SharesView: View {
 		else { Text("No shared files yet.").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity) }
 	}
 
+	/// Nothing for a link that is serving. Otherwise the reason it is not —
+	/// which stopped being "Expired or paused" once revoked records began
+	/// outliving the link, and once a pause became something you can undo.
+	private func endedBadge(_ share: ShareSummary) -> (String, Color)? {
+		if share.isLive { return nil }
+		if share.paused && share.isActive { return ("Paused", .orange) }
+		switch share.state {
+		case "uploading": return ("Uploading", .secondary)
+		case "revoked": return ("Revoked", .secondary)
+		case "spent": return ("Used up", .secondary)
+		case "aborted": return ("Failed", .secondary)
+		default: return ("Expired", .secondary)
+		}
+	}
+
 	private func badge(_ text: String, _ color: Color) -> some View {
 		Text(text).font(.caption2).padding(.horizontal, 5).padding(.vertical, 1)
 			.background(color.opacity(0.18), in: Capsule()).foregroundStyle(color)
@@ -56,6 +71,11 @@ private struct ShareDetail: View {
 	@State private var copied = false
 	@State private var showQR = false
 	@State private var confirmingRevoke = false
+	@State private var confirmingDelete = false
+	@State private var restoring = false
+	/// Resolved once per share rather than per render: it stats the disk, and
+	/// both the button and the text below it need the answer.
+	@State private var source: AppState.ShareSource = .unrecorded
 	@State private var path = ""
 	@State private var pathStatus = NameStatus.empty
 	@State private var savingPath = false
@@ -76,20 +96,66 @@ private struct ShareDetail: View {
 			LabeledContent("Expires") { Text(Date(timeIntervalSince1970: share.expiresAt / 1000), style: .relative) }
 			LabeledContent("Downloads", value: share.maxDownloads.map { "\(share.downloads) of \($0)" } ?? "\(share.downloads) served")
 			if share.hasPassword { LabeledContent("Password", value: "Required") }
-			if share.isLive { pathEditor }
+			if share.isActive { pathEditor }
 			Spacer()
-			Button("Revoke Share…", role: .destructive) { confirmingRevoke = true }.disabled(!share.isLive)
+			if share.paused && share.isActive {
+				Text("Paused. Anyone opening the link is told it is temporarily unavailable — the file and the path are still yours, and resuming puts it straight back.")
+					.font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+			}
+			if !share.isActive && share.state != "uploading" {
+				Text(restoreHint)
+					.font(.caption)
+					.foregroundStyle(restorableFile == nil ? .orange : .secondary)
+					.fixedSize(horizontal: false, vertical: true)
+			}
+			HStack {
+				if !share.isActive && share.state != "uploading" {
+					// No ellipsis, and nothing to choose: the link was made from
+					// one specific file and that is the only file it can come
+					// back as, so there is no question worth asking.
+					Button("Restore") { restore() }.disabled(restoring || restorableFile == nil)
+				}
+				// Pause is the only reversible way to stop a link, so it leads.
+				// Revoking deletes the file, which is why there is no "unrevoke"
+				// next to it and why this button is not spelled the same way.
+				if share.isActive {
+					Button(share.paused ? "Resume" : "Pause") {
+						Task { await state.setSharePaused(share, paused: !share.paused) }
+					}
+				}
+				Spacer()
+				Button("Revoke…", role: .destructive) { confirmingRevoke = true }.disabled(!share.isActive)
+				Button("Delete…", role: .destructive) { confirmingDelete = true }
+			}
 		}
 		.padding(20).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-		.onAppear { path = share.code }
+		.onAppear {
+			path = share.code
+			source = state.sourceFile(for: share)
+		}
 		.onChange(of: share.code) { code in path = code }
 		.sheet(isPresented: $showQR) { QRSheet(title: share.filename, url: share.url) { showQR = false } }
 		.alert("Revoke this share?", isPresented: $confirmingRevoke) {
 			Button("Cancel", role: .cancel) {}
 			Button("Revoke", role: .destructive) { Task { await state.revokeShare(share) } }
 		} message: {
-			Text("The link stops working immediately and the file is deleted from our server. Copies people already downloaded remain with them.")
+			Text("This cannot be undone — the file is deleted from our server, so there is nothing to turn back on. To stop the link temporarily, pause it instead. The record and its path stay yours. Copies people already downloaded remain with them.")
 		}
+		.alert("Delete this share?", isPresented: $confirmingDelete) {
+			Button("Cancel", role: .cancel) {}
+			Button("Delete", role: .destructive) { Task { await state.deleteShare(share) } }
+		} message: {
+			Text(deleteWarning)
+		}
+	}
+
+	/// Said differently for a live link because deleting one does two things at
+	/// once, and the path being handed back is the half that outlives the file.
+	private var deleteWarning: String {
+		let released = "Its path becomes free, so a later link can use that address — anyone still holding this one would reach a different file."
+		return share.isLive
+			? "The link stops working immediately and the file is deleted from our server. \(released) Copies people already downloaded remain with them."
+			: "The record is removed from this list. \(released)"
 	}
 
 	/// The path half of a share address, edited here for the same reason an
@@ -135,8 +201,40 @@ private struct ShareDetail: View {
 		}
 	}
 
+	private var restoreHint: String {
+		switch source {
+		case .known(let file):
+			return "This link has ended, but it still holds /~\(share.code). Restoring uploads \(file.lastPathComponent) again and the address starts working. It must be that same file — the record checks, which is what keeps the link honest for anyone still holding it."
+		case .missing:
+			// Deliberately not "delete this link" flat out. The commonest way a
+			// file goes missing is an external drive that is not plugged in, and
+			// telling someone to throw away a working link because their SSD is
+			// in a bag would be wrong more often than it is right.
+			return "\(share.filename) is no longer where it was, so this link cannot be restored. If it lived on a drive that is not connected, reconnect it and try again. Otherwise the only thing left to do with this link is delete it."
+		case .unrecorded:
+			return "This link was made before the app started remembering which file a share came from, so it cannot be restored. Delete it and share the file again to get a link that can be."
+		}
+	}
+
 	private var pathIsDirty: Bool {
 		ShareCodeRules.normalise(path) != share.code
+	}
+
+	private var restorableFile: URL? {
+		if case .known(let file) = source { return file }
+		return nil
+	}
+
+	private func restore() {
+		guard let file = restorableFile else { return }
+		restoring = true
+		Task {
+			_ = await state.restoreShare(share, from: file)
+			// It may have moved under us, and a failed restore should not leave
+			// the button promising a file that is no longer there.
+			source = state.sourceFile(for: share)
+			restoring = false
+		}
 	}
 
 	private func savePath() {

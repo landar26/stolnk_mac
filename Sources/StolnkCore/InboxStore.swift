@@ -11,6 +11,22 @@ public struct FolderBinding: Codable, Sendable, Hashable {
 	}
 }
 
+/// The local file a share was made from, plus enough to survive it being moved.
+///
+/// Kept so restoring a link does not have to ask which file it was. The record
+/// on the server knows everything about the share except its bytes, and this is
+/// the last piece — without it the one thing standing between an ended link and
+/// working again is a file picker the user has to answer correctly.
+public struct SourceBinding: Codable, Sendable, Hashable {
+	public var path: String
+	public var bookmark: Data?
+
+	public init(path: String, bookmark: Data? = nil) {
+		self.path = path
+		self.bookmark = bookmark
+	}
+}
+
 public struct LandedFile: Codable, Sendable, Identifiable, Hashable {
 	public let id: String
 	public let name: String
@@ -56,6 +72,8 @@ public struct StoredState: Codable, Sendable {
 	public var folders: [String: FolderBinding] = [:]
 	public var inboxes: [InboxSummary] = []
 	public var shares: [ShareSummary] = []
+	/// Keyed by share id. See `SourceBinding`.
+	public var sources: [String: SourceBinding] = [:]
 	public var recent: [LandedFile] = []
 	public var hasCompletedOnboarding = false
 	/// PRD 14 — Finder opens once, on the first successful receive, as proof it
@@ -66,7 +84,7 @@ public struct StoredState: Codable, Sendable {
 	public init() {}
 
 	enum CodingKeys: String, CodingKey {
-		case scheme, baseHost, deviceID, name, token, folders, inboxes, shares, recent
+		case scheme, baseHost, deviceID, name, token, folders, inboxes, shares, sources, recent
 		case hasCompletedOnboarding, hasOpenedFinderOnce, openFinderEveryTime
 	}
 
@@ -80,6 +98,7 @@ public struct StoredState: Codable, Sendable {
 		folders = try values.decodeIfPresent([String: FolderBinding].self, forKey: .folders) ?? [:]
 		inboxes = try values.decodeIfPresent([InboxSummary].self, forKey: .inboxes) ?? []
 		shares = try values.decodeIfPresent([ShareSummary].self, forKey: .shares) ?? []
+		sources = try values.decodeIfPresent([String: SourceBinding].self, forKey: .sources) ?? [:]
 		recent = try values.decodeIfPresent([LandedFile].self, forKey: .recent) ?? []
 		hasCompletedOnboarding = try values.decodeIfPresent(Bool.self, forKey: .hasCompletedOnboarding) ?? false
 		hasOpenedFinderOnce = try values.decodeIfPresent(Bool.self, forKey: .hasOpenedFinderOnce) ?? false
@@ -179,10 +198,127 @@ public final class InboxStore: @unchecked Sendable {
 
 	// MARK: - Folders
 
+	/**
+	 Where a relative `FolderBinding.path` is anchored.
+
+	 macOS stores absolute paths, and can: the user picked a folder anywhere on
+	 the disk and that path is stable. iOS has neither half of that. Every folder
+	 is inside the app's own container, and the container path carries a UUID
+	 that is regenerated on reinstall and can change on update. An absolute path
+	 written today is one that resolves to nothing after the next App Store
+	 update — a binding silently lost, and files landing nowhere. So off macOS
+	 the stored path is relative, and this is what it is relative to.
+
+	 Documents rather than Application Support because the landing folders are
+	 the product: with `UIFileSharingEnabled` this is the tree the Files app
+	 shows, and a received file the owner cannot reach from Files has not really
+	 arrived.
+	 */
+	#if os(macOS)
+	private static var landingRoot: URL? { nil }
+	#else
+	private static var landingRoot: URL? {
+		FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+	}
+	#endif
+
 	public func bind(inboxID: String, to folder: URL) {
+		#if os(macOS)
+		// Security-scoped: the grant from the open panel does not outlive the
+		// process without one, so a relaunch would otherwise lose the folder.
 		let bookmark = try? folder.bookmarkData(
 			options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil)
-		mutate { $0.folders[inboxID] = FolderBinding(path: folder.path, bookmark: bookmark) }
+		let stored = folder.path
+		#else
+		// Nothing off macOS hands out a security scope, and the folder is inside
+		// the container this process already owns.
+		let bookmark: Data? = nil
+		let stored = Self.relativePath(of: folder) ?? folder.path
+		#endif
+		mutate { $0.folders[inboxID] = FolderBinding(path: stored, bookmark: bookmark) }
+	}
+
+	/// Turns a stored `FolderBinding.path` back into a URL. Identity on macOS,
+	/// where the path is absolute; anchored to the container off it. An absolute
+	/// path is always taken as-is, so a binding written by an older build still
+	/// resolves.
+	private static func resolve(_ path: String) -> URL {
+		guard let root = landingRoot, !path.hasPrefix("/") else {
+			return URL(fileURLWithPath: path)
+		}
+		return path.isEmpty ? root : root.appendingPathComponent(path, isDirectory: true)
+	}
+
+	/// `folder` expressed relative to the landing root, or nil when it is not
+	/// inside it. Nil leaves the caller storing an absolute path, which does not
+	/// survive a container move — still the better failure, since the
+	/// alternative is a path that silently resolves to a folder the user never
+	/// chose.
+	private static func relativePath(of folder: URL) -> String? {
+		guard let root = landingRoot else { return nil }
+		let rootPath = root.standardizedFileURL.path
+		let folderPath = folder.standardizedFileURL.path
+		guard folderPath == rootPath || folderPath.hasPrefix(rootPath + "/") else { return nil }
+		return String(folderPath.dropFirst(rootPath.count).drop(while: { $0 == "/" }))
+	}
+
+	/// Remember the file a share was made from.
+	public func bindSource(shareID: String, to file: URL) {
+		#if os(macOS)
+		// Tracks the file through a rename or a move, which a stored path cannot.
+		// Not for access: this app is deliberately unsandboxed (PRD 10.1), so the
+		// path alone already opens.
+		let bookmark = try? file.bookmarkData(
+			options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil)
+		#else
+		let bookmark: Data? = nil
+		#endif
+		mutate { $0.sources[shareID] = SourceBinding(path: file.path, bookmark: bookmark) }
+	}
+
+	public func unbindSource(shareID: String) {
+		mutate { $0.sources[shareID] = nil }
+	}
+
+	/**
+	 The file a share was made from, or nil when it can no longer be found.
+
+	 Nil is a normal answer, not a failure: files get moved to other machines,
+	 emptied out of Downloads, or deleted once they have been sent. The caller
+	 falls back to asking. What this must never do is return a *different* file
+	 — the server checks the hash, but a picker pre-filled with the wrong thing
+	 wastes an upload to find that out.
+	 */
+	public func source(for shareID: String) -> URL? {
+		guard let binding = snapshot.sources[shareID] else { return nil }
+
+		#if os(macOS)
+		if let bookmark = binding.bookmark {
+			var stale = false
+			if let resolved = try? URL(
+				resolvingBookmarkData: bookmark,
+				options: [.withSecurityScope],
+				relativeTo: nil,
+				bookmarkDataIsStale: &stale
+			) {
+				if isReadableFile(resolved) {
+					if stale { bindSource(shareID: shareID, to: resolved) }
+					return resolved
+				}
+			}
+		}
+		#endif
+
+		let fallback = URL(fileURLWithPath: binding.path)
+		return isReadableFile(fallback) ? fallback : nil
+	}
+
+	private func isReadableFile(_ url: URL) -> Bool {
+		var isDirectory: ObjCBool = false
+		guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+			!isDirectory.boolValue
+		else { return false }
+		return FileManager.default.isReadableFile(atPath: url.path)
 	}
 
 	/// Drops an inbox's folder binding. Deleting an inbox on the server leaves
@@ -203,6 +339,7 @@ public final class InboxStore: @unchecked Sendable {
 	public func folder(for inboxID: String) -> URL? {
 		guard let binding = snapshot.folders[inboxID] else { return nil }
 
+		#if os(macOS)
 		if let bookmark = binding.bookmark {
 			var stale = false
 			if let resolved = try? URL(
@@ -217,8 +354,9 @@ public final class InboxStore: @unchecked Sendable {
 				}
 			}
 		}
+		#endif
 
-		let fallback = URL(fileURLWithPath: binding.path)
+		let fallback = Self.resolve(binding.path)
 		return isUsable(fallback) ? fallback : nil
 	}
 

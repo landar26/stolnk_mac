@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import StolnkCore
+import StolnkLAN
 import SwiftUI
 
 /// PRD 10.4. Note what is absent: there is no "the sender can't reach you"
@@ -670,6 +671,10 @@ final class AppState: ObservableObject {
 				}
 			}
 			shareUploads.removeAll { $0.id == uploadID }
+			// Remembered now so restoring this link later does not have to ask
+			// which file it was. Written after the upload, so a link that never
+			// finished leaves no binding behind.
+			store.bindSource(shareID: handle.shareID, to: file)
 			await refreshShares()
 			copyShareURL(handle.url)
 			closeNewShare()
@@ -701,10 +706,100 @@ final class AppState: ObservableObject {
 			ShareCodeRules.normalise(candidate), forShare: shareID)
 	}
 
+	/**
+	 Put the file back behind a link that has ended.
+
+	 The Mac does not remember which file a share came from — `createShare` uses
+	 the URL and drops it — so this asks for it again. That is not only a
+	 limitation: the record carries the original sha256 and the server refuses
+	 anything else, so picking the file is also how the promise "this URL means
+	 this file" survives the link coming back.
+
+	 The size is checked here purely to fail fast. The hash is the real gate and
+	 it lives on the server, where a wrong file costs an upload before it is
+	 caught; a wrong size costs nothing to catch and is the common mistake.
+	 */
+	/// Why a share can or cannot be restored. `unrecorded` is its own case
+	/// rather than another kind of `missing` because the advice differs: a file
+	/// that moved might come back when a drive is plugged in, while a link made
+	/// before this app remembered source files never had one to lose.
+	enum ShareSource {
+		case known(URL)
+		case missing
+		case unrecorded
+	}
+
+	func sourceFile(for share: ShareSummary) -> ShareSource {
+		if let file = store.source(for: share.shareID) { return .known(file) }
+		return store.snapshot.sources[share.shareID] == nil ? .unrecorded : .missing
+	}
+
+	func restoreShare(_ share: ShareSummary, from file: URL) async -> Bool {
+		guard let api else { return false }
+		let uploadID = UUID()
+		do {
+			let values = try file.resourceValues(forKeys: [.fileSizeKey])
+			guard (values.fileSize ?? -1) == share.size else {
+				lastError = "That file is a different size from the one this link was created for."
+				return false
+			}
+			let handle = try await api.restoreShare(share.shareID)
+			shareUploads.append(ShareUpload(id: uploadID, filename: share.filename, progress: 0))
+			let scoped = file.startAccessingSecurityScopedResource()
+			defer { if scoped { file.stopAccessingSecurityScopedResource() } }
+			try await api.uploadShare(handle, from: file) { [weak self] progress in
+				Task { @MainActor in
+					guard let self, let index = self.shareUploads.firstIndex(where: { $0.id == uploadID }) else { return }
+					self.shareUploads[index].progress = progress
+				}
+			}
+			shareUploads.removeAll { $0.id == uploadID }
+			// Where it lives now, which is not necessarily where it lived when
+			// the link was made — that is often the whole reason we had to ask.
+			store.bindSource(shareID: share.shareID, to: file)
+			await refreshShares()
+			return true
+		} catch let error as APIError where error.isUpgradeRequired {
+			shareUploads.removeAll { $0.id == uploadID }
+			upgradePrompt = UpgradePrompt(title: "Restore with Pro", message: error.message)
+		} catch {
+			shareUploads.removeAll { $0.id == uploadID }
+			// Includes the server's hash refusal, which is the wrong-file case
+			// the size check above could not see.
+			handle(error)
+			await refreshShares()
+		}
+		return false
+	}
+
+	/// Pause or resume. Unlike `revokeShare` this is reversible, because it
+	/// leaves the file where it is.
+	func setSharePaused(_ share: ShareSummary, paused: Bool) async {
+		guard let api else { return }
+		do {
+			_ = try await api.setSharePaused(share.shareID, paused: paused)
+			await refreshShares()
+		} catch { handle(error) }
+	}
+
 	func revokeShare(_ share: ShareSummary) async {
 		guard let api else { return }
 		do {
 			try await api.revokeShare(share.shareID)
+			await refreshShares()
+		} catch { handle(error) }
+	}
+
+	/// Unlike revoking, this gives up the path too — see `deleteShare` in the
+	/// Worker for why the two are separate actions.
+	func deleteShare(_ share: ShareSummary) async {
+		guard let api else { return }
+		do {
+			try await api.deleteShare(share.shareID)
+			// The record is gone, so the mapping to a local file would sit in
+			// state.json forever pointing at a share nothing can restore —
+			// the same reason `unbind` exists for a deleted inbox.
+			store.unbindSource(shareID: share.shareID)
 			await refreshShares()
 		} catch { handle(error) }
 	}

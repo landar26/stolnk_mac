@@ -149,9 +149,20 @@ public actor APIClient {
 		return try await send("POST", "/api/v1/shares", body: body)
 	}
 
+	private func patchShare(_ shareID: String, _ body: [String: Any]) async throws -> ShareSummary {
+		try await send("PATCH", "/api/v1/shares/\(shareID)", body: body)
+	}
+
 	/// Repath a live link. The old URL stops working the moment this returns.
 	public func updateShareCode(_ shareID: String, code: String) async throws -> ShareSummary {
-		try await send("PATCH", "/api/v1/shares/\(shareID)", body: ["code": code])
+		try await patchShare(shareID, ["code": code])
+	}
+
+	/// Stop serving the link without giving up its bytes or its path — the
+	/// reversible counterpart to revoking, which deletes the file and cannot be
+	/// undone. A paused link answers 423 until it is resumed.
+	public func setSharePaused(_ shareID: String, paused: Bool) async throws -> ShareSummary {
+		try await patchShare(shareID, ["paused": paused])
 	}
 
 	/// Mirrors `nameAvailable`: a path that cannot be checked is never reported
@@ -175,8 +186,23 @@ public actor APIClient {
 		return (response.name, response.shares)
 	}
 
+	/// Stop the link and release the file, but keep the record — and with it the
+	/// claim on its path, so no later share can take that address.
 	public func revokeShare(_ shareID: String) async throws {
 		struct Response: Codable { let revoked: Bool }
+		let _: Response = try await send("POST", "/api/v1/shares/\(shareID)/revoke")
+	}
+
+	/// Hand back an upload slot for a link that has ended, at the address it
+	/// already had. The result is shaped like `createShare`'s so the same upload
+	/// loop can carry it.
+	public func restoreShare(_ shareID: String) async throws -> ShareHandle {
+		try await send("POST", "/api/v1/shares/\(shareID)/restore")
+	}
+
+	/// Remove the record entirely, releasing the file and freeing its path.
+	public func deleteShare(_ shareID: String) async throws {
+		struct Response: Codable { let deleted: Bool }
 		let _: Response = try await send("DELETE", "/api/v1/shares/\(shareID)")
 	}
 

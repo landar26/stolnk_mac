@@ -67,6 +67,55 @@ final class InboxStoreTests: XCTestCase {
 
 	/// Deleting an inbox must not leave a mapping behind in state.json, or the
 	/// file grows a dead entry per deleted inbox for the life of the install.
+	private func makeFile(_ name: String, bytes: String = "x") throws -> URL {
+		try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+		let url = directory.appendingPathComponent(name)
+		try Data(bytes.utf8).write(to: url)
+		return url
+	}
+
+	func testShareSourceSurvivesARelaunch() throws {
+		let store = InboxStore(directory: directory)
+		let file = try makeFile("report.pdf")
+
+		store.bindSource(shareID: "share-1", to: file)
+
+		let reloaded = InboxStore(directory: directory)
+		XCTAssertEqual(reloaded.source(for: "share-1")?.standardizedFileURL, file.standardizedFileURL)
+	}
+
+	/// Nil is the normal answer for a file that has been moved off the machine
+	/// or thrown away, and the caller is expected to ask instead.
+	func testAMissingShareSourceResolvesToNil() throws {
+		let store = InboxStore(directory: directory)
+		let file = try makeFile("gone.pdf")
+		store.bindSource(shareID: "share-1", to: file)
+		try FileManager.default.removeItem(at: file)
+
+		XCTAssertNil(store.source(for: "share-1"))
+	}
+
+	/// A share was made from a file, not a folder, and handing one back would
+	/// send the restore straight into an upload it cannot perform.
+	func testAFolderIsNotAShareSource() throws {
+		let store = InboxStore(directory: directory)
+		store.bindSource(shareID: "share-1", to: try makeFolder("not-a-file"))
+
+		XCTAssertNil(store.source(for: "share-1"))
+	}
+
+	func testUnbindingAShareSourceIsPersisted() throws {
+		let store = InboxStore(directory: directory)
+		store.bindSource(shareID: "share-1", to: try makeFile("one.pdf"))
+		store.bindSource(shareID: "share-2", to: try makeFile("two.pdf"))
+
+		store.unbindSource(shareID: "share-1")
+
+		let reloaded = InboxStore(directory: directory)
+		XCTAssertNil(reloaded.source(for: "share-1"))
+		XCTAssertNotNil(reloaded.source(for: "share-2"))
+	}
+
 	func testUnbindIsPersisted() throws {
 		let store = InboxStore(directory: directory)
 		store.bind(inboxID: "inbox-1", to: try makeFolder("landing"))

@@ -48,8 +48,16 @@ public enum FileLanding {
 	 client could send an executable and it would launch without the "downloaded
 	 from the internet" check. That is a line this product does not get to cross,
 	 and it would also be noticed during notarisation.
+
+	 A no-op off macOS, and present rather than absent so that `Receiver` — the
+	 one path both platforms run — does not have to branch. `setxattr` itself
+	 exists on iOS, but `com.apple.quarantine` means nothing there: there is no
+	 Gatekeeper, and every file already lives inside the app's sandbox. Writing
+	 it anyway would be an attribute nothing reads, on a platform where the
+	 reason for it does not apply.
 	 */
 	public static func applyQuarantine(to url: URL, agent: String = "Stolnk") {
+		#if os(macOS)
 		let flags = "0081"
 		let timestamp = String(format: "%08x", Int(Date().timeIntervalSince1970))
 		let value = "\(flags);\(timestamp);\(agent);\(UUID().uuidString)"
@@ -57,12 +65,18 @@ public enum FileLanding {
 		_ = url.withUnsafeFileSystemRepresentation { path in
 			setxattr(path, "com.apple.quarantine", data, data.count, 0, 0)
 		}
+		#endif
 	}
 
+	/// Always false off macOS — see `applyQuarantine`, which writes nothing there.
 	public static func hasQuarantine(_ url: URL) -> Bool {
-		url.withUnsafeFileSystemRepresentation { path in
+		#if os(macOS)
+		return url.withUnsafeFileSystemRepresentation { path in
 			getxattr(path, "com.apple.quarantine", nil, 0, 0, 0) > 0
 		}
+		#else
+		return false
+		#endif
 	}
 }
 

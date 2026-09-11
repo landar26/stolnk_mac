@@ -42,7 +42,13 @@ public struct ShareSummary: Codable, Identifiable, Sendable, Hashable {
 	public let lastDownloadAt: Double?
 
 	public var id: String { shareID }
+	/// A stranger holding the URL gets the file right now.
 	public var isLive: Bool { state == "ready" && !paused && expiresAt > Date().timeIntervalSince1970 * 1000 }
+	/// The link has not ended — it may still be paused. This is what can be
+	/// repathed, revoked or resumed, and it is deliberately wider than `isLive`:
+	/// a paused link is stopped, not finished, and locking its controls would
+	/// leave the only way out of a pause being to destroy the link.
+	public var isActive: Bool { state == "ready" && expiresAt > Date().timeIntervalSince1970 * 1000 }
 
 	enum CodingKeys: String, CodingKey {
 		case shareID = "share_id", code, url, filename, size, sha256
