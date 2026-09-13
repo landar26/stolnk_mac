@@ -32,6 +32,21 @@ final class WindowPresenter {
 		}
 
 		let hosting = NSHostingController(rootView: content())
+		// Not the default sizing, which also carries `.minSize` and `.maxSize`.
+		// Those two make the hosting view write the window's content-size extrema
+		// from inside its own `updateConstraints`, and measuring the SwiftUI
+		// content to arrive at them dirties the view graph — which marks the
+		// window as needing constraints again, which measures again. Whether that
+		// settles depends on where the content's ideal size lands relative to the
+		// rounding AppKit does on the way in, and for the Share a File sheet it
+		// did not: the pass count ran past AppKit's ceiling of one per view and
+		// the app died on the uncaught NSGenericException that ceiling throws.
+		//
+		// `.intrinsicContentSize` alone still sizes each window to its content and
+		// still grows it when a warning or an error line appears — it just leaves
+		// contentMinSize and contentMaxSize alone, so there is no size for the
+		// measurement and the window to disagree about.
+		hosting.sizingOptions = [.intrinsicContentSize]
 		let window = NSWindow(contentViewController: hosting)
 		window.title = title
 		window.styleMask = [.titled, .closable]

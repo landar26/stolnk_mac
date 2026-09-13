@@ -26,6 +26,25 @@ struct SharesView: View {
 					Label("Share a File…", systemImage: "plus").frame(maxWidth: .infinity, alignment: .leading)
 				}
 				.buttonStyle(.plain).padding(10)
+				.disabled(state.shareSlotsFull)
+				// Said where the button is, rather than only in the sheet the
+				// button no longer opens. A greyed control with no reason beside
+				// it is the thing this is meant to avoid.
+				if state.shareSlotsFull {
+					VStack(alignment: .leading, spacing: 4) {
+						Text(state.shareSlotsMessage)
+							.font(.caption).foregroundStyle(.secondary)
+							.fixedSize(horizontal: false, vertical: true)
+						if state.plan?.isPro != true {
+							Button("See Pro") {
+								state.upgradePrompt = UpgradePrompt(
+									title: "Share with Pro", message: state.shareSlotsMessage)
+							}
+							.buttonStyle(.link).font(.caption)
+						}
+					}
+					.padding(.horizontal, 10).padding(.bottom, 10)
+				}
 			}
 			.frame(width: 220)
 			Divider()

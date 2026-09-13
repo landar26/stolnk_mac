@@ -270,10 +270,16 @@ public final class InboxStore: @unchecked Sendable {
 		// path alone already opens.
 		let bookmark = try? file.bookmarkData(
 			options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil)
+		let stored = file.path
 		#else
+		// Relative for the same reason `bind(inboxID:to:)` is — the container path
+		// carries a UUID that is regenerated on reinstall, so an absolute path
+		// written today resolves to nothing after the next update, and Restore
+		// would silently lose a file that is still sitting in the drive.
 		let bookmark: Data? = nil
+		let stored = Self.relativePath(of: file) ?? file.path
 		#endif
-		mutate { $0.sources[shareID] = SourceBinding(path: file.path, bookmark: bookmark) }
+		mutate { $0.sources[shareID] = SourceBinding(path: stored, bookmark: bookmark) }
 	}
 
 	public func unbindSource(shareID: String) {
@@ -309,8 +315,17 @@ public final class InboxStore: @unchecked Sendable {
 		}
 		#endif
 
-		let fallback = URL(fileURLWithPath: binding.path)
+		let fallback = Self.resolveFile(binding.path)
 		return isReadableFile(fallback) ? fallback : nil
+	}
+
+	/// The file counterpart of `resolve(_:)`. Identity on macOS and for any
+	/// absolute path, so a binding written by an older build still resolves.
+	private static func resolveFile(_ path: String) -> URL {
+		guard let root = landingRoot, !path.hasPrefix("/"), !path.isEmpty else {
+			return URL(fileURLWithPath: path)
+		}
+		return root.appendingPathComponent(path, isDirectory: false)
 	}
 
 	private func isReadableFile(_ url: URL) -> Bool {

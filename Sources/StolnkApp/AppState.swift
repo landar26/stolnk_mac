@@ -369,10 +369,52 @@ final class AppState: ObservableObject {
 	}
 
 	func showNewShare() {
+		// Before the file picker, not after: nobody should be asked to choose a
+		// file for a link that cannot be made. The menu bar's button deliberately
+		// stays enabled and lands here, because a dead control in a menu with no
+		// room to say why explains nothing — this opens the list and the reason
+		// together. The server still decides; this only declines to ask.
+		if shareSlotsFull {
+			// Via the Shares tab, not straight to the sheet: `UpgradeSheet` is
+			// attached to the settings window (SettingsView.swift:28), so from the
+			// menu bar there would be nothing to present it — and the list of links
+			// is where the one to delete actually is.
+			showSettings(tab: .shares)
+			upgradePrompt = UpgradePrompt(title: "Share with Pro", message: shareSlotsMessage)
+			return
+		}
 		guard let file = FilePicker.choose(prompt: "Choose one file to share") else { return }
 		presenter.show(id: "new-share", title: "Share a File") {
 			NewShareView(file: file).environmentObject(self)
 		}
+	}
+
+	/**
+	 Whether every share slot this plan has is spoken for.
+
+	 The count is of *records*, matching `admitShare` on the server: `shares` is
+	 the whole list, terminal rows included — they are the ones wearing Revoked
+	 and Expired badges — and a record holds its slot until it is deleted.
+
+	 False whenever the limit is unknown (an older Worker, or a plan that has not
+	 loaded yet), which leaves the behaviour this replaces: the refusal is a 402.
+	 */
+	var shareSlotsFull: Bool {
+		guard let limit = plan?.shareLimit else { return false }
+		return shares.count >= limit
+	}
+
+	/// Says what to do about it, and only mentions Pro when Pro is the answer.
+	var shareSlotsMessage: String {
+		let limit = plan?.shareLimit ?? shares.count
+		if plan?.isPro == true {
+			return "You have \(limit) links, the most a plan allows. Delete one to make another."
+		}
+		// Worded off the number rather than off the word "one", so this does not
+		// quietly become a lie the day `FREE.maxShares` moves.
+		return limit == 1
+			? "Free includes one share link. Delete the one you have to make another — revoking keeps its address, and with it its slot."
+			: "Free includes \(limit) share links. Delete one to make another — revoking keeps a link's address, and with it its slot."
 	}
 
 	func closeNewShare() { presenter.close(id: "new-share") }

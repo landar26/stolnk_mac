@@ -175,6 +175,17 @@ public struct PlanState: Codable, Sendable, Equatable {
 	public let tier: String
 	public let relayUsed: Int
 	public let relayLimit: Int
+	/**
+	 How many outbound links this plan allows, so the UI can grey out "Share a
+	 File…" instead of letting someone pick a file for a link the server will
+	 refuse.
+
+	 Optional on purpose. `AppState.refreshPlan` is a `try?`, so a required field
+	 missing from an older Worker would fail the whole decode and blank the plan
+	 everywhere it is shown. Absent means "do not pre-empt" — the 402 still
+	 arrives, exactly as it did before this field existed.
+	 */
+	public let shareLimit: Int?
 	public let license: License?
 
 	public var isPro: Bool { tier == "pro" }
@@ -191,6 +202,7 @@ public struct PlanState: Codable, Sendable, Equatable {
 		case tier
 		case relayUsed = "relay_used"
 		case relayLimit = "relay_limit"
+		case shareLimit = "share_limit"
 		case license
 	}
 }
@@ -199,6 +211,15 @@ public struct APIError: Error, LocalizedError, Sendable {
 	public let status: Int
 	public let code: String
 	public let message: String
+
+	/// Public so the apps can raise one for a refusal they decide locally, and
+	/// have it travel the same `isQuota` / `isUpgradeRequired` / `isAuth` paths
+	/// their error handling already routes on.
+	public init(status: Int, code: String, message: String) {
+		self.status = status
+		self.code = code
+		self.message = message
+	}
 
 	public var errorDescription: String? { message }
 

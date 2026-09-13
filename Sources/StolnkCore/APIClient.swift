@@ -30,19 +30,23 @@ public actor APIClient {
 	/// identity (PRD 6.1). A name already in use fails with 409 and creates
 	/// nothing, so retrying with a different one is clean.
 	///
-	/// No display name is sent: the first inbox is the device's own, so the server
-	/// names it after the name. It can be changed later like any other inbox's.
-	public func register(name: String, slug: String) async throws -> RegistrationResult {
+	/// `slug` is optional, and the two callers differ on it. The Mac sends one so
+	/// onboarding ends on a working URL in a single round trip; iOS sends none,
+	/// because there a path is the name given to a *folder* and no folder has been
+	/// picked yet. Omitting it registers the name and creates no inbox at all —
+	/// which is not a half-built device, only one with no address yet.
+	///
+	/// No display name is sent: an inbox created here is the device's own, so the
+	/// server names it after the name. It can be changed later like any other's.
+	public func register(name: String, slug: String? = nil) async throws -> RegistrationResult {
+		var payload: [String: Any] = [
+			"name": name,
+			"pubkey_sig": identity.signingPublicKeyEncoded,
+			"pubkey_kex": identity.agreementPublicKeyEncoded,
+		]
+		if let slug { payload["slug"] = slug }
 		let result: RegistrationResult = try await send(
-			"POST", "/api/v1/devices",
-			body: [
-				"name": name,
-				"slug": slug,
-				"pubkey_sig": identity.signingPublicKeyEncoded,
-				"pubkey_kex": identity.agreementPublicKeyEncoded,
-			],
-			authenticated: false
-		)
+			"POST", "/api/v1/devices", body: payload, authenticated: false)
 		deviceID = result.deviceID
 		token = result.token
 		return result
@@ -271,6 +275,17 @@ public actor APIClient {
 	/// on the subject — there is no local notion of "I am Pro".
 	public func plan() async throws -> PlanState {
 		try await send("GET", "/api/v1/licenses/status")
+	}
+
+	/// Verifies a StoreKit transaction with Apple on the Worker and attaches the
+	/// resulting non-consumable entitlement to this device. The transaction id is
+	/// opaque input; product, bundle, purchase type and refund status all come
+	/// from Apple's server response.
+	public func verifyApplePurchase(transactionID: UInt64) async throws -> PlanState {
+		try await send(
+			"POST", "/api/v1/licenses/apple/verify",
+			body: ["transaction_id": String(transactionID)]
+		)
 	}
 
 	/// Claims a seat for this Mac. The key goes to our own server, which holds
